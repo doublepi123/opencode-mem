@@ -18,6 +18,7 @@ import { isConfigured, CONFIG, initConfig } from "./config.js";
 import { log } from "./services/logger.js";
 import type { MemoryType } from "./types/index.js";
 import { getLanguageName } from "./services/language-detector.js";
+import { filterInjectedParts } from "./services/injected-prompt-filter.js";
 import type { MemoryScope } from "./services/client.js";
 import { getHostClientConfig } from "./services/ai/opencode-host-config.js";
 import { loadOpencodeProvider } from "./services/ai/opencode-provider-loader.js";
@@ -461,7 +462,16 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
         );
 
         if (textParts.length === 0) return;
-        const userMessage = textParts.map((p) => p.text).join("\n");
+
+        // Host- and plugin-injected blocks reach this hook through the same
+        // parts array as real user input. Recording them would train both
+        // auto-capture and profile learning on another plugin's boilerplate.
+        const authoredParts = CONFIG.chatMessage.filterInjectedPrompts
+          ? filterInjectedParts(textParts, CONFIG.chatMessage.injectionMarkers)
+          : textParts;
+
+        if (authoredParts.length === 0) return;
+        const userMessage = authoredParts.map((p) => p.text).join("\n");
         if (!userMessage.trim()) return;
 
         if (
