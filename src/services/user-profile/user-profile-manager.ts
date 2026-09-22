@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tursoConnectionManager } from "../turso/connection-manager.js";
 import type { TursoDb } from "../turso/turso-db.js";
 import { CONFIG } from "../../config.js";
@@ -78,6 +78,7 @@ export class UserProfileManager {
   // (COLD_BUFFER_DEFAULT_KEY) only holds items from merges that ran without a profileId.
   private coldBuffers: Map<string, { preferences: any[]; patterns: any[]; workflows: any[] }>;
   private coldBufferPath: string;
+  private coldBufferMtimeMs: number | null = null;
   private dedupCheckedCache: Set<string> = new Set();
 
   constructor() {
@@ -133,11 +134,34 @@ export class UserProfileManager {
     return { preferences: [], patterns: [], workflows: [] };
   }
 
+  /**
+   * Discards the cached cold buffer when another process has rewritten the file.
+   *
+   * The buffer is read once in the constructor and `saveColdBuffers` rewrites the
+   * whole file from this in-memory map. Now that more than one process can run
+   * profile learning, a process holding a stale map would erase entries a peer
+   * persisted in the meantime. Comparing the file's mtime keeps that correctness
+   * requirement inside the manager instead of relying on every caller to refresh.
+   */
+  private refreshColdBuffersIfChanged(): void {
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(this.coldBufferPath).mtimeMs;
+    } catch {
+      // No file yet (or unreadable): nothing on disk can be newer than our map.
+      return;
+    }
+    if (this.coldBufferMtimeMs !== null && mtimeMs <= this.coldBufferMtimeMs) return;
+    this.coldBuffers = this.loadColdBuffers();
+    this.coldBufferMtimeMs = mtimeMs;
+  }
+
   private getColdBuffer(profileId?: string): {
     preferences: any[];
     patterns: any[];
     workflows: any[];
   } {
+    this.refreshColdBuffersIfChanged();
     const key = profileId || COLD_BUFFER_DEFAULT_KEY;
     let buf = this.coldBuffers.get(key);
     if (!buf) {
@@ -196,6 +220,9 @@ export class UserProfileManager {
         }
       }
       writeFileSync(this.coldBufferPath, JSON.stringify(obj), "utf-8");
+      // Record our own write so the next read does not mistake it for a peer's
+      // update and reload the map we just persisted.
+      this.coldBufferMtimeMs = statSync(this.coldBufferPath).mtimeMs;
     } catch {
       // Silently ignore disk-full / permission errors.
     }

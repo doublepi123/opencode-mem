@@ -8,6 +8,7 @@ import { userProfileManager } from "./user-profile/user-profile-manager.js";
 import { sortProfileItems } from "../utils/profile.js";
 import type { UserProfile, UserProfileData } from "./user-profile/types.js";
 import { loadOpencodeProvider } from "./ai/opencode-provider-loader.js";
+import { tryAcquireProfileLearningLock } from "./user-profile/learning-lock.js";
 
 let isLearningRunning = false;
 
@@ -66,6 +67,18 @@ export async function performUserProfileLearning(
     });
     return;
   }
+
+  // `isLearningRunning` only guards re-entry inside one process. Prompt selection
+  // is a plain SELECT and the batch is marked only after the LLM responds, so
+  // without cross-process exclusion two instances sharing this storage would
+  // analyze the same prompts and the slower writer would clobber the faster
+  // one's profile update. Contention skips this round; the next idle retries.
+  const releaseLearningLock = tryAcquireProfileLearningLock(directory);
+  if (!releaseLearningLock) {
+    log("user-profile-learning: skipped (another process holds the learning lock)");
+    return;
+  }
+
   isLearningRunning = true;
   try {
     const count = await userPromptManager.countUnanalyzedForUserLearning();
@@ -291,6 +304,7 @@ Rules:
     throw error;
   } finally {
     isLearningRunning = false;
+    releaseLearningLock();
   }
 }
 
