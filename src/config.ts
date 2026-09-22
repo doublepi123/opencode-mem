@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { stripJsoncComments } from "./services/jsonc.js";
 import { resolveSecretValue } from "./services/secret-resolver.js";
 import { isPlaceholderApiKey } from "./services/ai/api-key-placeholder.js";
+import { getDefaultInjectionMarkers } from "./services/injected-prompt-filter.js";
 
 const CONFIG_DIR = join(homedir(), ".config", "opencode");
 const DATA_DIR = join(homedir(), ".opencode-mem");
@@ -98,6 +99,8 @@ interface OpenCodeMemConfig {
     excludeCurrentSession?: boolean;
     maxAgeDays?: number;
     injectOn?: "first" | "always";
+    filterInjectedPrompts?: boolean;
+    injectionMarkers?: string[];
   };
 }
 
@@ -202,6 +205,8 @@ const DEFAULTS: Required<
     excludeCurrentSession: true,
     maxAgeDays: undefined,
     injectOn: "first",
+    filterInjectedPrompts: true,
+    injectionMarkers: [...getDefaultInjectionMarkers()],
   },
 };
 
@@ -556,7 +561,20 @@ const CONFIG_TEMPLATE = `{
   // ============================================
   
   // Inject user profile into AI context (preferences, patterns, workflows)
-  "injectProfile": true
+  "injectProfile": true,
+
+  // Chat message capture and injection behavior
+  "chatMessage": {
+    // Skip prompt text injected by the host or by other OpenCode plugins
+    // (system reminders, orchestration directives, background-task
+    // notifications) so it is never stored as if the user had typed it.
+    // Disable only if you deliberately want that content memorized.
+    "filterInjectedPrompts": true
+
+    // Extra markers identifying injected blocks. These are ADDED to the
+    // built-in list, never replace it.
+    // "injectionMarkers": ["<my-plugin-banner>"]
+  }
 }
 `;
 
@@ -630,6 +648,33 @@ export function normalizeAutoCleanupRetentionDays(value: number): number {
     throw new Error(`Invalid autoCleanupRetentionDays config: ${value}`);
   }
   return value;
+}
+
+/**
+ * User-supplied markers extend the built-in set rather than replacing it, so
+ * adding one marker cannot silently disable protection against all the others.
+ */
+export function normalizeInjectionMarkers(value: string[] | undefined): string[] {
+  const defaults = getDefaultInjectionMarkers();
+  if (value === undefined) return [...defaults];
+  if (!Array.isArray(value)) {
+    throw new Error(`Invalid chatMessage.injectionMarkers config: expected an array`);
+  }
+
+  const merged = [...defaults];
+  for (const marker of value) {
+    if (typeof marker !== "string") {
+      throw new Error(
+        `Invalid chatMessage.injectionMarkers entry: expected a string, got ${typeof marker}`
+      );
+    }
+    const trimmed = marker.trim();
+    if (!trimmed) continue;
+    if (!merged.some((existing) => existing.toLowerCase() === trimmed.toLowerCase())) {
+      merged.push(trimmed);
+    }
+  }
+  return merged;
 }
 
 function buildConfig(fileConfig: OpenCodeMemConfig) {
@@ -777,6 +822,9 @@ function buildConfig(fileConfig: OpenCodeMemConfig) {
       maxAgeDays: fileConfig.chatMessage?.maxAgeDays,
       injectOn: (fileConfig.chatMessage?.injectOn ?? DEFAULTS.chatMessage.injectOn) as
         "first" | "always",
+      filterInjectedPrompts:
+        fileConfig.chatMessage?.filterInjectedPrompts ?? DEFAULTS.chatMessage.filterInjectedPrompts,
+      injectionMarkers: normalizeInjectionMarkers(fileConfig.chatMessage?.injectionMarkers),
     },
   };
 }
