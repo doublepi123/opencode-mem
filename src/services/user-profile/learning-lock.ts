@@ -1,160 +1,412 @@
-import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { createClient, type Client } from "@libsql/client";
 import { CONFIG } from "../../config.js";
 import { log } from "../logger.js";
 
-const LEARNING_LOCK = ".profile-learning.lock";
-
 /**
- * Upper bound on how long a lock may be held before other processes treat it as
- * abandoned. Profile learning issues LLM requests, so this has to exceed a slow
- * provider round trip; it only matters when a holder dies without releasing and
- * its PID has already been reused by an unrelated process.
+ * Standalone coordination database (SQLite via @libsql/client) inside
+ * CONFIG.storagePath. It is deliberately separate from the memory database:
+ * every statement here is short and autonomous, and no transaction is ever
+ * held across the LLM round trip, so lock traffic cannot block normal memory
+ * database work.
  */
-const STALE_LOCK_MS = 30 * 60 * 1000;
+export const PROFILE_LEARNING_COORDINATION_DB = ".profile-learning-coordination.db";
 
-/**
- * Grace period during which a lock file whose contents cannot be parsed is left
- * alone. `writeFileSync` is not atomic, so a reader can observe a file that was
- * created but not yet filled in. Deleting it on sight would hand the lock to a
- * second process while the first believes it holds it.
- */
-const WRITE_WINDOW_MS = 5_000;
+/** Single logical lock — the table only ever holds this one row. */
+const LOCK_NAME = "profile-learning";
 
-interface LearningLockState {
+/** Bounded wait so a contended coordination DB cannot hang an idle handler. */
+const BUSY_TIMEOUT_MS = 5_000;
+
+interface ProcessIdentity {
   pid: number;
-  acquiredAt: number;
-  directory: string;
+  bootId: string | null;
+  starttime: string | null;
 }
 
-function isProcessAlive(pid: number): boolean {
+interface ValidOwner {
+  ownerToken: string;
+  pid: number;
+  bootId: string | null;
+  starttime: string | null;
+}
+
+type ProcStatResult =
+  { status: "ok"; starttime: string } | { status: "absent" } | { status: "unreadable" };
+
+/** Linux boot_id is a lowercase UUID printed by the kernel. */
+const BOOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function coordinationDbPath(): string {
+  return resolve(CONFIG.storagePath || "", PROFILE_LEARNING_COORDINATION_DB);
+}
+
+/**
+ * Opens the coordination database, guarantees the lock table exists, runs the
+ * callback, and always closes the handle. One handle per operation; nothing is
+ * cached across the LLM round trip.
+ */
+async function withCoordinationDb<T>(fn: (client: Client) => Promise<T>): Promise<T> {
+  const dbPath = coordinationDbPath();
+  try {
+    mkdirSync(dirname(dbPath), { recursive: true });
+  } catch {
+    // Already exists, or the statements below will fail loudly on their own.
+  }
+  const client = createClient({ url: `file:${dbPath}` });
+  try {
+    await client.execute(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    await client.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+      name TEXT PRIMARY KEY,
+      owner_token TEXT NOT NULL,
+      pid INTEGER NOT NULL,
+      boot_id TEXT,
+      starttime TEXT,
+      acquired_at INTEGER NOT NULL
+    )`);
+    return await fn(client);
+  } finally {
+    client.close();
+  }
+}
+
+function rowsAffected(result: { rowsAffected?: number | bigint }): number {
+  return Number(result.rowsAffected ?? 0);
+}
+
+/**
+ * Reads the machine's current boot id. The value is only used as a dead
+ * signal when it matches the strict kernel format; anything unreadable or
+ * malformed is treated as "unknown" and never participates in a dead
+ * decision.
+ */
+function readBootId(): string | null {
+  try {
+    const value = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
+    return BOOT_ID_PATTERN.test(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Reads field 22 (starttime) of /proc/<pid>/stat. The comm field may contain
+ * spaces and parentheses, so parsing starts after the final ')' in the line;
+ * after that point field N lives at index N - 3 (state is field 3).
+ */
+function readProcStat(pid: number): ProcStatResult {
+  let stat: string;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT"
+      ? { status: "absent" }
+      : { status: "unreadable" };
+  }
+  const commEnd = stat.lastIndexOf(")");
+  if (commEnd === -1) {
+    return { status: "unreadable" };
+  }
+  const fields = stat.slice(commEnd + 2).split(" ");
+  const starttime = fields[22 - 3];
+  return starttime && /^\d+$/.test(starttime)
+    ? { status: "ok", starttime }
+    : { status: "unreadable" };
+}
+
+function currentProcessIdentity(): ProcessIdentity {
+  const own = readProcStat(process.pid);
+  return {
+    pid: process.pid,
+    bootId: readBootId(),
+    starttime: own.status === "ok" ? own.starttime : null,
+  };
+}
+
+function coercePid(value: unknown): number | null {
+  if (typeof value === "number" && Number.isInteger(value) && value > 0) {
+    return value;
+  }
+  if (typeof value === "bigint" && value > 0n && Number.isSafeInteger(Number(value))) {
+    return Number(value);
+  }
+  if (typeof value === "string" && /^-?\d+$/.test(value)) {
+    const pid = Number(value);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  }
+  return null;
+}
+
+function coerceOptionalString(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Boot id of a stored owner record. Three distinct states:
+ *  - "none"  — column is NULL: legitimately recorded on a platform without
+ *              /proc (conservative signal-probe fallback applies);
+ *  - "known" — a well-formed Linux boot id string;
+ *  - invalid — anything else (garbage string, number, object, …). Never
+ *              null-coerced: an owner whose boot id we cannot interpret is
+ *              an untrusted record and the lock is not acquired (fail-closed).
+ */
+type StoredBootId = { kind: "none" } | { kind: "known"; value: string };
+
+function parseStoredBootId(value: unknown): StoredBootId | null {
+  if (value === null) return { kind: "none" };
+  if (typeof value === "string" && BOOT_ID_PATTERN.test(value)) {
+    return { kind: "known", value };
+  }
+  return null;
+}
+
+/**
+ * Structural validation of the stored owner record. A malformed record is
+ * never treated as a free or reclaimable lock (fail-closed): the caller just
+ * skips this round instead of potentially stealing a live holder's lock.
+ */
+function parseOwnerRow(
+  row: Record<string, unknown>
+): { ok: true; owner: ValidOwner } | { ok: false; reason: string } {
+  const ownerToken = coerceOptionalString(row["owner_token"]);
+  if (!ownerToken) return { ok: false, reason: "owner_token missing/empty" };
+
+  const pid = coercePid(row["pid"]);
+  if (pid === null) return { ok: false, reason: `invalid pid: ${String(row["pid"])}` };
+
+  const storedBootId = parseStoredBootId(row["boot_id"]);
+  if (!storedBootId) return { ok: false, reason: `invalid boot_id: ${String(row["boot_id"])}` };
+  const bootId = storedBootId.kind === "known" ? storedBootId.value : null;
+
+  let starttime: string | null = null;
+  if (row["starttime"] !== null && row["starttime"] !== undefined) {
+    const raw = row["starttime"];
+    if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+      return { ok: false, reason: "invalid starttime" };
+    }
+    starttime = raw;
+  }
+
+  const acquiredAt = row["acquired_at"];
+  if (
+    typeof acquiredAt !== "number" &&
+    typeof acquiredAt !== "bigint" &&
+    !/^\d+$/.test(String(acquiredAt ?? ""))
+  ) {
+    return { ok: false, reason: "invalid acquired_at" };
+  }
+
+  return { ok: true, owner: { ownerToken, pid, bootId, starttime } };
+}
+
+/**
+ * True only when the recorded owner is *definitively* gone from this
+ * machine's current PID namespace:
+ *  - its boot id is a valid UUID differing from this machine's current valid
+ *    boot id (the holder ran under a previous boot), or
+ *  - /proc/<pid>/stat is readable and starttime differs (PID reuse), or
+ *  - /proc/<pid>/stat is absent AND the signal-0 probe returns ESRCH —
+ *    hidepid=2 makes a live holder's /proc entry invisible, so ENOENT alone
+ *    is never proof of death, or
+ *  - (no startup identity recorded) signal 0 returns ESRCH.
+ *
+ * EPERM means "alive under another uid" and counts as live; any other
+ * error means "unknown" and is never a dead signal. Identity we cannot
+ * establish is never guessed, and no TTL ever overrides this check.
+ *
+ * Single-machine view: the coordination DB is expected to be shared only by
+ * processes on one host. A record written by a process in another PID
+ * namespace is beyond what local /proc can attest and conservatively reads
+ * as not-dead.
+ */
+/**
+ * Signal-0 liveness probe. ESRCH is the only "dead" outcome: EPERM means
+ * alive under another uid (hidepid=2 or another user), and any other error
+ * means "unknown", which is never a dead signal.
+ */
+/**
+ * Signal-0 liveness probe. ESRCH is the only "dead" outcome: EPERM means
+ * alive under another uid (hidepid=2 or another user), and any other error
+ * means "unknown", which is never a dead signal.
+ */
+function isPidGoneBySignal(pid: number): boolean {
   try {
     process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ESRCH";
+  }
+}
+
+function ownerIsDefinitelyDead(owner: ValidOwner, self: ProcessIdentity): boolean {
+  if (self.bootId !== null && owner.bootId !== null && owner.bootId !== self.bootId) {
     return true;
-  } catch {
+  }
+
+  if (self.starttime !== null && owner.starttime !== null) {
+    const stat = readProcStat(owner.pid);
+    if (stat.status === "ok") {
+      return stat.starttime !== owner.starttime;
+    }
+    if (stat.status === "absent") {
+      // /proc may be hidden (hidepid=2): fall through to the signal probe
+      // instead of trusting ENOENT as proof of death.
+      return isPidGoneBySignal(owner.pid);
+    }
     return false;
   }
+
+  return isPidGoneBySignal(owner.pid);
 }
 
-function lockPath(): string {
-  return join(CONFIG.storagePath || "", LEARNING_LOCK);
-}
-
-function removeLock(path: string): void {
-  try {
-    unlinkSync(path);
-  } catch {
-    // Already gone (lost the cleanup race) or held open by the OS. Either way
-    // this process does not own it, so surface nothing.
-  }
-}
-
-/**
- * Returns the state of a lock that is still held, or null when no live holder
- * remains. A stale lock is removed as a side effect so the caller can retry.
- */
-function readLiveLock(path: string): LearningLockState | null {
-  let raw: string;
-  try {
-    raw = readFileSync(path, "utf-8");
-  } catch {
-    return null;
-  }
-
-  let state: LearningLockState;
-  try {
-    state = JSON.parse(raw) as LearningLockState;
-  } catch {
-    // Unparseable: either mid-write by a live acquirer, or genuinely corrupt.
-    // Respect the write window before reclaiming so we never steal a lock that
-    // another process is in the middle of taking.
-    let mtimeMs: number;
+function releaseFn(ownerToken: string): () => Promise<void> {
+  let released = false;
+  return async () => {
+    if (released) return;
+    released = true;
     try {
-      mtimeMs = statSync(path).mtimeMs;
-    } catch {
-      return null;
+      await withCoordinationDb(async (client) => {
+        await client.execute({
+          sql: `DELETE FROM profile_learning_lock WHERE name = ? AND owner_token = ?`,
+          args: [LOCK_NAME, ownerToken],
+        });
+      });
+    } catch (error) {
+      // The owner row survives; after this process exits another process can
+      // reclaim it via the dead-owner CAS path. Never throw out of release.
+      log("profile-learning lock: release failed; row will be reclaimed after exit", {
+        error: String(error),
+      });
     }
-    if (Date.now() - mtimeMs < WRITE_WINDOW_MS) {
-      return { pid: -1, acquiredAt: mtimeMs, directory: "<initializing>" };
-    }
-    removeLock(path);
-    return null;
-  }
-
-  if (!Number.isInteger(state.pid) || state.pid <= 0) {
-    removeLock(path);
-    return null;
-  }
-
-  if (state.pid !== process.pid && !isProcessAlive(state.pid)) {
-    log("profile-learning lock: reclaiming lock from dead holder", { pid: state.pid });
-    removeLock(path);
-    return null;
-  }
-
-  const age = Date.now() - (state.acquiredAt ?? 0);
-  if (Number.isFinite(age) && age > STALE_LOCK_MS) {
-    log("profile-learning lock: reclaiming expired lock", { pid: state.pid, ageMs: age });
-    removeLock(path);
-    return null;
-  }
-
-  return state;
+  };
 }
 
 /**
  * Serializes profile learning across every process sharing this storage path.
  *
- * Profile learning selects a batch of prompts with a plain SELECT, issues an LLM
- * request, then writes the profile and marks the batch. None of that is atomic,
- * so two processes running it concurrently would analyze the same prompts twice
- * and the slower writer would clobber the faster one's profile update.
+ * Ownership is a single row in a standalone SQLite coordination database:
+ *  - acquiring is one `INSERT ... ON CONFLICT DO NOTHING` (rowsAffected 1 wins);
+ *  - a conflicting row is only taken over with a conditional
+ *    `UPDATE ... WHERE owner_token = <old token>` (CAS) when the recorded
+ *    owner is provably dead or its original process identity is gone;
+ *  - release is `DELETE ... WHERE owner_token = <token>`, so a stale release
+ *    from a previous owner (even with a reused PID) can never drop someone
+ *    else's lock.
  *
- * Returns a release function, or null when another process holds the lock — in
- * which case the caller must skip this round rather than wait, because the next
- * idle event will retry.
+ * Returns a release function, or null when another process holds the lock or
+ * the coordination state cannot be trusted (fail-closed) — in both cases the
+ * caller must skip this round rather than wait, because the next idle event
+ * retries.
+ *
+ * Service wiring note: this function is async and must be `await`ed by the
+ * caller, with the in-process `isLearningRunning` guard set before the first
+ * `await`.
  */
-export function tryAcquireProfileLearningLock(directory: string): (() => void) | null {
-  const path = lockPath();
+export async function tryAcquireProfileLearningLock(
+  directory: string
+): Promise<(() => Promise<void>) | null> {
+  const identity = currentProcessIdentity();
+  const ownerToken = randomUUID();
 
   try {
-    mkdirSync(CONFIG.storagePath || "", { recursive: true });
-  } catch {
-    // Storage path already exists, or cannot be created — the write below fails
-    // loudly enough on its own.
-  }
+    return await withCoordinationDb(async (client) => {
+      const inserted = await client.execute({
+        sql: `INSERT INTO profile_learning_lock
+                (name, owner_token, pid, boot_id, starttime, acquired_at)
+              VALUES (?, ?, ?, ?, ?, ?)
+              ON CONFLICT (name) DO NOTHING`,
+        args: [
+          LOCK_NAME,
+          ownerToken,
+          identity.pid,
+          identity.bootId,
+          identity.starttime,
+          Date.now(),
+        ],
+      });
+      if (rowsAffected(inserted) === 1) {
+        return releaseFn(ownerToken);
+      }
 
-  const holder = readLiveLock(path);
-  if (holder) return null;
+      const selected = await client.execute({
+        sql: `SELECT owner_token, pid, boot_id, starttime, acquired_at
+              FROM profile_learning_lock WHERE name = ?`,
+        args: [LOCK_NAME],
+      });
+      const row = selected.rows[0] as Record<string, unknown> | undefined;
+      if (!row) {
+        // Released between our failed INSERT and the SELECT. Treat as
+        // contention: skip this round, the next idle event retries.
+        return null;
+      }
 
-  const state: LearningLockState = {
-    pid: process.pid,
-    acquiredAt: Date.now(),
-    directory,
-  };
+      const parsed = parseOwnerRow(row);
+      if (!parsed.ok) {
+        log("profile-learning lock: malformed coordination record, refusing to acquire", {
+          directory,
+          reason: parsed.reason,
+        });
+        return null;
+      }
 
-  try {
-    writeFileSync(path, JSON.stringify(state), { flag: "wx" });
-  } catch {
-    // Lost the race: another process created the file between our check and
-    // write. `wx` is what makes that detectable rather than silently shared.
+      if (!ownerIsDefinitelyDead(parsed.owner, identity)) {
+        // Live holder, EPERM, or uncertain identity: never reclaim, never
+        // guess, and no TTL is allowed to override this.
+        return null;
+      }
+
+      const claimed = await client.execute({
+        sql: `UPDATE profile_learning_lock
+              SET owner_token = ?, pid = ?, boot_id = ?, starttime = ?, acquired_at = ?
+              WHERE name = ? AND owner_token = ?`,
+        args: [
+          ownerToken,
+          identity.pid,
+          identity.bootId,
+          identity.starttime,
+          Date.now(),
+          LOCK_NAME,
+          parsed.owner.ownerToken,
+        ],
+      });
+      if (rowsAffected(claimed) === 1) {
+        log("profile-learning lock: reclaimed lock from dead owner", {
+          directory,
+          previousPid: parsed.owner.pid,
+        });
+        return releaseFn(ownerToken);
+      }
+      // Lost the CAS race to another reclaimer.
+      return null;
+    });
+  } catch (error) {
+    log("profile-learning lock: coordination database unavailable, refusing to acquire", {
+      directory,
+      error: String(error),
+    });
     return null;
   }
-
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    try {
-      const current = JSON.parse(readFileSync(path, "utf-8")) as LearningLockState;
-      if (current.pid !== process.pid) return;
-    } catch {
-      return;
-    }
-    removeLock(path);
-  };
 }
 
-export function isProfileLearningLockHeld(): boolean {
-  return readLiveLock(lockPath()) !== null;
+/**
+ * Whether a coordination record currently exists. Test/inspection helper; a
+ * database error is reported as "not held" but logged.
+ */
+export async function isProfileLearningLockHeld(): Promise<boolean> {
+  try {
+    return await withCoordinationDb(async (client) => {
+      const result = await client.execute({
+        sql: `SELECT 1 FROM profile_learning_lock WHERE name = ? LIMIT 1`,
+        args: [LOCK_NAME],
+      });
+      return result.rows.length > 0;
+    });
+  } catch (error) {
+    log("profile-learning lock: coordination database unavailable in isProfileLearningLockHeld", {
+      error: String(error),
+    });
+    return false;
+  }
 }
