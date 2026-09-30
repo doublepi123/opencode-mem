@@ -966,14 +966,21 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
           try {
             await performAutoCapture(ctx, sessionID, directory);
 
-            // Prompts are shared across projects; an active non-owner must also learn.
-            // performUserProfileLearning already serializes concurrent in-process calls.
+            // Prompts are shared across projects, but web-server ownership tracks
+            // whoever bound the port first and is never handed over while that
+            // process stays reachable. Gating learning on it stalls the queue
+            // whenever the owner stops seeing sessions, and disables learning
+            // outright when the web server is off. Any active instance may learn;
+            // performUserProfileLearning holds a cross-process lock internally.
             log("profile-learning idle trigger", {
               directory,
               sessionID,
               webOwner: webServer?.isServerOwner() ?? false,
             });
             await performUserProfileLearning(ctx, directory);
+
+            // Retention cleanup stays owner-only: it is storage-wide maintenance
+            // that has no reason to run once per active instance.
             if (webServer?.isServerOwner()) {
               const { cleanupService } = await import("./services/cleanup-service.js");
               if (await cleanupService.shouldRunCleanup()) await cleanupService.runCleanup();
