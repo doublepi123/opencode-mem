@@ -68,19 +68,23 @@ export async function performUserProfileLearning(
     return;
   }
 
+  // Set before the first await so a same-process re-entry bounces off the flag
+  // instead of queueing behind this run and running a second analysis.
+  //
   // `isLearningRunning` only guards re-entry inside one process. Prompt selection
   // is a plain SELECT and the batch is marked only after the LLM responds, so
   // without cross-process exclusion two instances sharing this storage would
   // analyze the same prompts and the slower writer would clobber the faster
   // one's profile update. Contention skips this round; the next idle retries.
-  const releaseLearningLock = tryAcquireProfileLearningLock(directory);
-  if (!releaseLearningLock) {
-    log("user-profile-learning: skipped (another process holds the learning lock)");
-    return;
-  }
-
   isLearningRunning = true;
+  let releaseLearningLock: (() => Promise<void> | void) | null = null;
   try {
+    releaseLearningLock = await tryAcquireProfileLearningLock(directory);
+    if (!releaseLearningLock) {
+      log("user-profile-learning: skipped (another process holds the learning lock)");
+      return;
+    }
+
     const count = await userPromptManager.countUnanalyzedForUserLearning();
     const threshold = CONFIG.userProfileAnalysisInterval;
 
@@ -303,8 +307,17 @@ Rules:
     log("user-profile-learning: aborted", { error: String(error) });
     throw error;
   } finally {
-    isLearningRunning = false;
-    releaseLearningLock();
+    // Release only when the lock was actually acquired (contention return,
+    // acquisition failure, and any throw before acquisition all leave it null).
+    // The flag resets in a nested finally so it stays raised while the release
+    // await is in flight — otherwise a same-process re-entry could slip in and
+    // find the cross-process lock already gone — and it still resets when the
+    // release itself rejects.
+    try {
+      await releaseLearningLock?.();
+    } finally {
+      isLearningRunning = false;
+    }
   }
 }
 
@@ -662,6 +675,14 @@ async function analyzeUserProfile(
   let opencodeProviderError: unknown;
   if (CONFIG.opencodeProvider && CONFIG.opencodeModel) {
     log("user-profile-learning: trying opencode provider");
+    // The try/catch boundary is the provider only: LLM client construction,
+    // the structured-output call, and schema binding. Stored-profile parsing
+    // and merging happen AFTER a successful LLM response and outside this
+    // try — a cold-storage read/parse/merge failure must propagate to the
+    // caller (logged + rethrown there), never be mistaken for a provider
+    // fault that silently falls back to the external API and then
+    // re-reads/re-merges the same broken storage.
+    let rawData: UserProfileData | null = null;
     try {
       const { generateStructuredOutput } = await loadOpencodeProvider();
       const { getOpenCodeClient } = await import("./ai/profile-llm-client.js");
@@ -708,8 +729,18 @@ Use the update_user_profile tool to save the ${existingProfile ? "updated" : "ne
         wfCount: result.workflows?.length,
       });
 
-      const rawData = result as unknown as UserProfileData;
+      rawData = result as unknown as UserProfileData;
+    } catch (e) {
+      opencodeProviderError = e;
+      log("user-profile-learning: opencode provider failed, falling back to external API", {
+        error: String(e),
+      });
+    }
 
+    // Stored-profile parse/merge runs only after a native success and is
+    // deliberately OUTSIDE the provider catch: storage faults here are not
+    // provider faults and must not trigger the external fallback.
+    if (rawData !== null) {
       if (existingProfile) {
         const existingData: UserProfileData = JSON.parse(existingProfile.profileData);
         const merged = await userProfileManager.mergeProfileData(
@@ -721,11 +752,6 @@ Use the update_user_profile tool to save the ${existingProfile ? "updated" : "ne
         return { raw: rawData, merged };
       }
       return { raw: rawData, merged: null };
-    } catch (e) {
-      opencodeProviderError = e;
-      log("user-profile-learning: opencode provider failed, falling back to external API", {
-        error: String(e),
-      });
     }
   }
 
