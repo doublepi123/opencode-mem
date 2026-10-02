@@ -38,8 +38,7 @@ type ProcStatResult =
   { status: "ok"; starttime: string } | { status: "absent" } | { status: "unreadable" };
 
 /** Linux boot_id is a lowercase UUID printed by the kernel. */
-const LINUX_BOOT_ID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LINUX_BOOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /** Darwin boot identity derived from kern.boottime seconds. */
 const DARWIN_BOOT_ID_PATTERN = /^darwin-boot-\d+$/;
 
