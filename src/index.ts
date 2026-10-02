@@ -825,6 +825,8 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
                   await import("./services/user-profile/user-profile-manager.js");
                 const { toPublicProfileData } =
                   await import("./services/user-profile/profile-utils.js");
+                const { tryAcquireProfileLearningLock } =
+                  await import("./services/user-profile/learning-lock.js");
 
                 const userId = tags.user.userEmail || "unknown";
 
@@ -851,38 +853,52 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
                     return JSON.stringify({ success: false, error: "Private content blocked" });
                   }
 
-                  const newPreference = {
-                    category: "explicit",
-                    description: sanitizedContent,
-                    confidence: 1.0,
-                    frequency: 1,
-                    evidence: ["manual-write"],
-                    lastSeen: Date.now(),
-                  };
-
-                  const existingProfile = await userProfileManager.getActiveProfile(userId);
-
-                  if (existingProfile) {
-                    const existingData = JSON.parse(existingProfile.profileData);
-                    const mergedData = await userProfileManager.mergeProfileData(
-                      existingData,
-                      {
-                        preferences: [newPreference],
-                      },
-                      undefined,
-                      existingProfile.id
-                    );
-                    await userProfileManager.updateProfile(
-                      existingProfile.id,
-                      mergedData,
-                      0,
-                      `Explicit preference added: ${sanitizedContent.slice(0, 80)}`
-                    );
+                  // Hold the same non-reentrant learning lock as performUserProfileLearning
+                  // so mergeProfileData's cold-buffer round cannot race learning. Do not
+                  // acquire inside mergeProfileData — learning already holds this lock.
+                  const releaseProfileWriteLock = await tryAcquireProfileLearningLock(directory);
+                  if (!releaseProfileWriteLock) {
                     return JSON.stringify({
-                      success: true,
-                      message: "Preference saved to profile",
+                      success: false,
+                      error:
+                        "Profile preference save is temporarily unavailable because profile learning holds the lock. Retry shortly.",
                     });
-                  } else {
+                  }
+
+                  try {
+                    const newPreference = {
+                      category: "explicit",
+                      description: sanitizedContent,
+                      confidence: 1.0,
+                      frequency: 1,
+                      evidence: ["manual-write"],
+                      lastSeen: Date.now(),
+                    };
+
+                    const existingProfile = await userProfileManager.getActiveProfile(userId);
+
+                    if (existingProfile) {
+                      const existingData = JSON.parse(existingProfile.profileData);
+                      const mergedData = await userProfileManager.mergeProfileData(
+                        existingData,
+                        {
+                          preferences: [newPreference],
+                        },
+                        undefined,
+                        existingProfile.id
+                      );
+                      await userProfileManager.updateProfile(
+                        existingProfile.id,
+                        mergedData,
+                        0,
+                        `Explicit preference added: ${sanitizedContent.slice(0, 80)}`
+                      );
+                      return JSON.stringify({
+                        success: true,
+                        message: "Preference saved to profile",
+                      });
+                    }
+
                     await userProfileManager.createProfile(
                       userId,
                       tags.user.displayName || userId,
@@ -895,6 +911,8 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
                       success: true,
                       message: "Profile created with preference",
                     });
+                  } finally {
+                    await releaseProfileWriteLock();
                   }
                 }
 

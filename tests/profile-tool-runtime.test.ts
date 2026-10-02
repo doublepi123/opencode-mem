@@ -9,6 +9,10 @@ type ScenarioInput = {
   sessionID?: string;
   mockGitConfigUnavailable?: boolean;
   readAfterWrite?: boolean;
+  /** Hold the real learning lock before the tool write (proves fail-closed contention). */
+  holdLearningLockBeforeWrite?: boolean;
+  /** Mock the lock to count acquire/release (proves the write path takes it). */
+  trackLearningLock?: boolean;
 };
 
 const tempDirs: string[] = [];
@@ -18,6 +22,8 @@ const userProfileManagerUrl = new URL(
   "../src/services/user-profile/user-profile-manager.js",
   import.meta.url
 ).href;
+const learningLockUrl = new URL("../src/services/user-profile/learning-lock.js", import.meta.url)
+  .href;
 
 function runScenario(input: ScenarioInput) {
   const dir = mkdtempSync(join(tmpdir(), "opencode-mem-profile-runtime-"));
@@ -100,6 +106,21 @@ mock.module(${JSON.stringify(userProfileManagerUrl)}, () => ({
 }));
 
 ${
+  input.trackLearningLock
+    ? `const lockStats = { acquireCount: 0, releaseCount: 0 };
+mock.module(${JSON.stringify(learningLockUrl)}, () => ({
+  tryAcquireProfileLearningLock: async () => {
+    lockStats.acquireCount += 1;
+    return async () => {
+      lockStats.releaseCount += 1;
+    };
+  },
+  isProfileLearningLockHeld: async () => false,
+}));`
+    : ""
+}
+
+${
   input.mockGitConfigUnavailable
     ? `mock.module("${new URL("../src/services/tags.js", import.meta.url).href}", () => ({
   getTags: () => ({
@@ -147,11 +168,25 @@ const plugin = await OpenCodeMemPlugin({
   },
 });
 
+let heldLockRelease = null;
+if (${JSON.stringify(Boolean(input.holdLearningLockBeforeWrite))}) {
+  const { tryAcquireProfileLearningLock } = await import(${JSON.stringify(learningLockUrl)});
+  heldLockRelease = await tryAcquireProfileLearningLock(tmpDir);
+  if (!heldLockRelease) {
+    throw new Error("failed to hold learning lock for contention scenario");
+  }
+}
+
 const writeResult = JSON.parse(
   await plugin.tool.memory.execute(${JSON.stringify(input.args)}, {
     sessionID: ${JSON.stringify(input.sessionID ?? "s1")},
   })
 );
+
+if (heldLockRelease) {
+  await heldLockRelease();
+  heldLockRelease = null;
+}
 
 let readResult = null;
 if (${JSON.stringify(Boolean(input.readAfterWrite))}) {
@@ -162,7 +197,11 @@ if (${JSON.stringify(Boolean(input.readAfterWrite))}) {
   );
 }
 
-console.log(JSON.stringify({ writeResult, readResult }));
+console.log(JSON.stringify({
+  writeResult,
+  readResult,
+  lockStats: typeof lockStats !== "undefined" ? lockStats : null,
+}));
 `;
 
   writeFileSync(scriptPath, script, "utf-8");
@@ -281,5 +320,36 @@ describe("memory tool profile runtime behavior", () => {
     expect(result.parsed.writeResult.error).toContain(
       "Cannot save profile preference because no user email could be resolved"
     );
+  });
+
+  it("acquires and releases the profile learning lock on preference write", () => {
+    const result = runScenario({
+      config: profileConfig(),
+      args: { mode: "profile", content: "Prefer short answers" },
+      sessionID: "s6",
+      trackLearningLock: true,
+    });
+
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr || result.stdout);
+    }
+    expect(result.parsed.writeResult.success).toBe(true);
+    expect(result.parsed.lockStats.acquireCount).toBe(1);
+    expect(result.parsed.lockStats.releaseCount).toBe(1);
+  });
+
+  it("fails closed when the profile learning lock is already held", () => {
+    const result = runScenario({
+      config: profileConfig(),
+      args: { mode: "profile", content: "Prefer short answers" },
+      sessionID: "s7",
+      holdLearningLockBeforeWrite: true,
+    });
+
+    if (result.exitCode !== 0) {
+      throw new Error(result.stderr || result.stdout);
+    }
+    expect(result.parsed.writeResult.success).toBe(false);
+    expect(result.parsed.writeResult.error).toContain("profile learning holds the lock");
   });
 });
