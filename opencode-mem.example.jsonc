@@ -111,6 +111,14 @@
     // "maxAgeDays": 30,
     // "first" = only on the first user message in a session; "always" = every message
     "injectOn": "first",
+    // Skip prompt text injected by the host or by other OpenCode plugins
+    // (system reminders, orchestration directives, background-task
+    // notifications) so it is never stored as if the user had typed it.
+    // Disable only if you deliberately want that content memorized.
+    "filterInjectedPrompts": true,
+    // Extra markers identifying injected blocks. These are ADDED to the
+    // built-in list, never replace it.
+    // "injectionMarkers": ["<my-plugin-banner>"],
   },
 
   // ============================================
