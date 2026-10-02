@@ -35,6 +35,7 @@ import { mock } from "bun:test";
 import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as importedFs from "node:fs";
+import * as importedChildProcess from "node:child_process";
 import * as importedLibsql from "@libsql/client";
 
 const storage = process.env.PLL_STORAGE;
@@ -49,6 +50,7 @@ if (!storage || !mode) {
 // are mocked, re-importing them inside a factory would resolve the mock and
 // recurse. These constants pin the real live bindings for the wrappers.
 const realReadFileSync = importedFs.readFileSync;
+const realSpawnSync = importedChildProcess.spawnSync;
 const realCreateClient = importedLibsql.createClient;
 
 const configUrl = new URL("../../src/config.js", import.meta.url).href;
@@ -62,10 +64,11 @@ mock.module(configUrl, () => ({
 }));
 mock.module(loggerUrl, () => ({ log: () => {} }));
 
-// current-boot-invalid: the LOCAL machine's boot_id file reads as garbage.
+// current-boot-invalid: the LOCAL machine's boot identity reads as garbage.
 // The implementation must treat the local boot id as "unknown" and never use
-// it as a dead signal, even against a well-formed foreign boot id. node:fs
-// must be mocked before learning-lock.js is imported.
+// it as a dead signal, even against a well-formed foreign boot id. Mocks must
+// be registered before learning-lock.js is imported (covers Linux /proc and
+// Darwin sysctl).
 if (mode === "current-boot-invalid") {
   mock.module("node:fs", () => ({
     ...importedFs,
@@ -73,6 +76,27 @@ if (mode === "current-boot-invalid") {
       path === "/proc/sys/kernel/random/boot_id"
         ? "not-a-boot-id"
         : realReadFileSync(path, options),
+  }));
+  mock.module("node:child_process", () => ({
+    ...importedChildProcess,
+    spawnSync: (command: any, args?: any, options?: any) => {
+      if (
+        command === "sysctl" &&
+        Array.isArray(args) &&
+        args[0] === "-n" &&
+        args[1] === "kern.boottime"
+      ) {
+        return {
+          status: 0,
+          stdout: "garbage-boot-identity",
+          stderr: "",
+          pid: 0,
+          output: [],
+          signal: null,
+        };
+      }
+      return realSpawnSync(command, args, options);
+    },
   }));
 }
 // cas-race: wrap the REAL @libsql/client so both competitors provably act
@@ -243,9 +267,13 @@ try {
       // won. Verifies malformed boot_id fails closed while valid-null and
       // same-as-host remain live (no reclaim), all with starttime set to
       // this process's real starttime (a live, identity-verifiable owner).
-      const stat = realReadFileSync(`/proc/self/stat`, "utf-8");
-      const ownStarttime = String(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[22 - 3]);
-      const bootFile = realReadFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
+      const { getProfileLearningBootId, getProfileLearningStarttime } = await import(lockUrl);
+      const ownStarttime = getProfileLearningStarttime(process.pid);
+      const bootFile = getProfileLearningBootId();
+      if (!ownStarttime || !bootFile) {
+        console.error("boot-variants requires local boot + starttime identity");
+        process.exit(1);
+      }
       const variants: Array<{ name: string; bootId: unknown; useRawSql?: string }> = [
         { name: "validNull", bootId: null },
         { name: "invalidString", bootId: "not-a-boot-id" },
