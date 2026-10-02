@@ -216,19 +216,24 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
     expect(await currentOwnerToken(dir)).toBe("planted-owner-token");
   }, 30_000);
 
-  it("never steals a lock owned by a process we cannot signal (EPERM)", async () => {
-    const dir = storage();
-    // PID 1 is alive and owned by root; kill(1, 0) yields EPERM for a
-    // non-root caller. No startup identity is recorded, so the
-    // implementation must fall back to the signal probe and treat EPERM
-    // as "alive, not reclaimable".
-    await plantOwner(dir, { pid: 1, starttime: null, acquiredAt: Date.now() });
+  it.skipIf(process.platform === "win32")(
+    "never steals a lock owned by a process we cannot signal (EPERM)",
+    async () => {
+      const dir = storage();
+      // PID 1 is alive and owned by root; kill(1, 0) yields EPERM for a
+      // non-root caller. No startup identity is recorded, so the
+      // implementation must fall back to the signal probe and treat EPERM
+      // as "alive, not reclaimable". Windows has no equivalent protected
+      // PID 1 semantics (PID 1 is typically ESRCH), so this probe is Unix-only.
+      await plantOwner(dir, { pid: 1, starttime: null, acquiredAt: Date.now() });
 
-    const result = await runProbe(dir);
-    expect(result.exitCode).toBe(0);
-    expect(result.parsed).toEqual({ acquired: false });
-    expect(await currentOwnerToken(dir)).toBe("planted-owner-token");
-  }, 30_000);
+      const result = await runProbe(dir);
+      expect(result.exitCode).toBe(0);
+      expect(result.parsed).toEqual({ acquired: false });
+      expect(await currentOwnerToken(dir)).toBe("planted-owner-token");
+    },
+    30_000
+  );
 
   it("exactly one of two competitors CAS-reclaims the same dead owner", async () => {
     const dir = storage();

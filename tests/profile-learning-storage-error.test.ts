@@ -20,8 +20,9 @@ afterAll(() => {
   }
 });
 
-const WORKER = new URL("./fixtures/profile-learning-storage-error-worker.mjs", import.meta.url)
-  .pathname;
+// Prefer import.meta.dir over URL.pathname: on Windows, pathname keeps a
+// leading slash (`/D:/...`) that Bun.spawnSync cannot execute.
+const WORKER = join(import.meta.dir, "fixtures", "profile-learning-storage-error-worker.mjs");
 
 interface RunResult {
   exitCode: number | null;

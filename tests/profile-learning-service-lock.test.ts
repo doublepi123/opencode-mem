@@ -27,9 +27,10 @@ afterAll(() => {
   }
 });
 
-const WORKER = new URL("./fixtures/profile-learning-service-worker.mjs", import.meta.url).pathname;
-const MEMORY_WRITER = new URL("./fixtures/profile-learning-memory-writer.mjs", import.meta.url)
-  .pathname;
+// Prefer import.meta.dir over URL.pathname: on Windows, pathname keeps a
+// leading slash (`/D:/...`) that Bun.spawn cannot execute.
+const WORKER = join(import.meta.dir, "fixtures", "profile-learning-service-worker.mjs");
+const MEMORY_WRITER = join(import.meta.dir, "fixtures", "profile-learning-memory-writer.mjs");
 
 interface WorkerEvent {
   ev: string;
