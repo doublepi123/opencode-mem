@@ -32,6 +32,8 @@ interface ValidOwner {
   pid: number;
   bootId: string | null;
   starttime: string | null;
+  /** Structured view of `starttime`; null exactly when `starttime` is null. */
+  parsedStarttime: ParsedStarttime | null;
 }
 
 type ProcStatResult =
@@ -175,6 +177,16 @@ function readDarwinStarttime(pid: number): ProcStatResult {
     // parsing without a timezone is implementation-defined and can disagree
     // across bun test vs worker processes (UTC vs local), which would make a
     // live holder look like PID reuse.
+    //
+    // TZ note (known limitation, deliberate non-change): lstart rendering can
+    // still depend on the reading process's TZ environment even under
+    // LC_ALL=C. Because the raw text is stored (never normalized), a holder
+    // and a later reader running under different TZ values would see
+    // different lstart text for the same live process and the mismatch path
+    // would misreport PID reuse. That would require evidence from real macOS
+    // deployments to justify a format migration — and any migration must
+    // keep existing stored rows readable so live holders under the old text
+    // are not stolen from. Until then this stays raw-text exact comparison.
     return { status: "ok", starttime: `darwin:${lstart}` };
   } catch {
     return { status: "unreadable" };
@@ -194,10 +206,15 @@ function readProcStat(pid: number): ProcStatResult {
 
 function currentProcessIdentity(): ProcessIdentity {
   const own = readProcStat(process.pid);
+  const starttime = own.status === "ok" ? own.starttime : null;
   return {
     pid: process.pid,
     bootId: readBootId(),
-    starttime: own.status === "ok" ? own.starttime : null,
+    // Only record a starttime that is itself a valid producer format: a
+    // malformed reader output (e.g. ps rendering outside the strict lstart
+    // shape) must degrade to "no starttime identity" (fail-closed) rather
+    // than persist an unparseable row or act as a comparable self identity.
+    starttime: starttime !== null && parseStoredStarttime(starttime) !== null ? starttime : null,
   };
 }
 
@@ -211,6 +228,93 @@ function coercePid(value: unknown): number | null {
   if (typeof value === "string" && /^-?\d+$/.test(value)) {
     const pid = Number(value);
     return Number.isInteger(pid) && pid > 0 ? pid : null;
+  }
+  return null;
+}
+
+/**
+ * Kind of a stored starttime identity. The two producers are platform
+ * specific and their outputs are not comparable with each other:
+ *  - "linux"  — decimal clock ticks from field 22 of /proc/<pid>/stat
+ *  - "darwin" — `darwin:<lstart>` from `ps -o lstart=` under LC_ALL=C
+ */
+type StarttimeKind = "linux" | "darwin";
+
+interface ParsedStarttime {
+  kind: StarttimeKind;
+  value: string;
+}
+
+/**
+ * Strict `ps -o lstart=` format under LC_ALL=C (no timezone — TZ affects it,
+ * see the note in readDarwinStarttime):
+ * `<weekday> <month> <day> <HH>:<MM>:<SS> <year>`, e.g.
+ * "Sat Oct  3 09:15:02 2026" (day is space-padded to two columns).
+ * Structural only: bound digits, no calendar meaning yet.
+ */
+const DARWIN_LSTART_PATTERN =
+  /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)  ?(\d{1,2}) ([01]\d|2[0-3]):[0-5]\d:[0-5]\d (\d{4})$/;
+
+const DARWIN_WEEKDAY_NAMES = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const DARWIN_MONTH_NAMES = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+] as const;
+
+/**
+ * Calendar validation of a structurally matched lstart. A permissive regex
+ * alone accepts impossible dates (Oct 99, Oct 00, Feb 30, Apr 31, Feb 29 on
+ * a non-leap year, or a weekday that does not exist); every one of those
+ * would make a live owner's stored identity "differ" from the reader's and
+ * fire the PID-reuse steal. So the match is round-tripped through the UTC
+ * calendar: Date.UTC is fed the claimed fields (never Date.parse, which
+ * interprets strings in the process TZ), the normalized fields must come
+ * back identical, and the derived weekday must equal the claimed one.
+ * Gregorian leap rules — including the century rule — are the calendar's.
+ */
+function isValidDarwinLstart(lstart: string): boolean {
+  const match = DARWIN_LSTART_PATTERN.exec(lstart);
+  if (!match) return false;
+  const weekday = match[1];
+  const monthIndex = DARWIN_MONTH_NAMES.indexOf(match[2] as (typeof DARWIN_MONTH_NAMES)[number]);
+  const day = Number(match[3]);
+  const year = Number(match[5]);
+  if (year < 1) return false; // regexp admits 0000; a real year is positive
+  const utc = new Date(Date.UTC(year, monthIndex, day));
+  if (
+    utc.getUTCFullYear() !== year ||
+    utc.getUTCMonth() !== monthIndex ||
+    utc.getUTCDate() !== day
+  ) {
+    return false; // day rolled over: this date does not exist on the calendar
+  }
+  return DARWIN_WEEKDAY_NAMES[utc.getUTCDay()] === weekday;
+}
+
+/**
+ * Structural parse of a stored starttime. Returns null for anything that is
+ * not exactly one of the two producer formats: Linux decimal ticks, or a
+ * strict Darwin lstart behind the `darwin:` prefix. A bare `darwin:` prefix,
+ * garbage suffix, malformed date, or non-numeric junk is invalid — never a
+ * comparable identity, and never usable to declare an owner dead.
+ */
+function parseStoredStarttime(raw: string): ParsedStarttime | null {
+  if (/^\d+$/.test(raw)) return { kind: "linux", value: raw };
+  if (raw.startsWith("darwin:")) {
+    const lstart = raw.slice("darwin:".length);
+    if (isValidDarwinLstart(lstart)) {
+      return { kind: "darwin", value: lstart };
+    }
   }
   return null;
 }
@@ -257,14 +361,18 @@ function parseOwnerRow(
   const bootId = storedBootId.kind === "known" ? storedBootId.value : null;
 
   let starttime: string | null = null;
+  let parsedStarttime: ParsedStarttime | null = null;
   if (row["starttime"] !== null && row["starttime"] !== undefined) {
     const raw = row["starttime"];
     if (typeof raw !== "string" || raw.length === 0 || raw.length > 160) {
       return { ok: false, reason: "invalid starttime" };
     }
     // Linux stores /proc starttime as digits; Darwin stores `darwin:<lstart>`.
-    if (!/^\d+$/.test(raw) && !raw.startsWith("darwin:")) {
-      return { ok: false, reason: "invalid starttime" };
+    // Anything that is not exactly one of those two producer formats is an
+    // untrusted record: fail closed rather than compare incomparable values.
+    parsedStarttime = parseStoredStarttime(raw);
+    if (!parsedStarttime) {
+      return { ok: false, reason: `invalid starttime: ${raw.slice(0, 40)}` };
     }
     starttime = raw;
   }
@@ -278,7 +386,7 @@ function parseOwnerRow(
     return { ok: false, reason: "invalid acquired_at" };
   }
 
-  return { ok: true, owner: { ownerToken, pid, bootId, starttime } };
+  return { ok: true, owner: { ownerToken, pid, bootId, starttime, parsedStarttime } };
 }
 
 /**
@@ -322,6 +430,18 @@ function ownerIsDefinitelyDead(owner: ValidOwner, self: ProcessIdentity): boolea
   }
 
   if (self.starttime !== null && owner.starttime !== null) {
+    // Cross-kind identities are never comparable: a Darwin lstart stored by
+    // a macOS holder can never equal a Linux host's numeric /proc ticks, so
+    // treating the inequality as "PID reuse" would CAS-steal a live lock the
+    // moment the coordination DB crosses platforms (or holds a foreign-format
+    // row). Fail closed instead: the signal probe alone decides.
+    if (owner.parsedStarttime === null) {
+      return false;
+    }
+    const selfParsed = parseStoredStarttime(self.starttime);
+    if (selfParsed === null || selfParsed.kind !== owner.parsedStarttime.kind) {
+      return false;
+    }
     const stat = readProcStat(owner.pid);
     if (stat.status === "ok") {
       return stat.starttime !== owner.starttime;
