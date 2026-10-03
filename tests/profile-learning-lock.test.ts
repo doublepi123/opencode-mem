@@ -504,69 +504,78 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
     }
   }, 180_000);
 
-  it("same-kind Darwin starttime: impossible dates fail closed, real dates stay usable (simulated darwin host)", async () => {
-    // Runs on Linux: the child fixture forces process.platform="darwin" and
-    // mocks ONLY the ps/sysctl boundary (real @libsql driver imported before
-    // the flip; SQL/CAS run against a real temp coordination DB). The mocked
-    // ps answers one controlled valid lstart ("Sat Oct  3 09:00:00 2026") —
-    // real calendar date — for every pid, so self identity is same-kind and
-    // deterministic. Nothing here can pass via the Linux foreign-kind guard.
-    const dir = storage();
-    const worker = spawnWorker(dir, "darwin-sim", "self-lstart", {
-      PLL_STARTTIME: "Sat Oct  3 09:00:00 2026",
-    });
-    const result = await worker.result;
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toBe("");
-    const own = result.parsed?.["ownStarttime"];
-    expect(own).toBe("darwin:Sat Oct  3 09:00:00 2026");
-    const variants = result.parsed?.["variants"] as Record<string, boolean>;
-    const tokens = result.parsed?.["tokens"] as Record<string, string | null>;
+  it.skipIf(process.platform === "win32")(
+    "same-kind Darwin starttime: impossible dates fail closed, real dates stay usable (simulated darwin host)",
+    async () => {
+      // Runs on Linux/macOS hosts: the child fixture forces process.platform=
+      // "darwin" and mocks ONLY the ps/sysctl boundary (real Turso driver
+      // imported before the flip; SQL/CAS run against a real temp coordination
+      // DB). The mocked ps answers one controlled valid lstart
+      // ("Sat Oct  3 09:00:00 2026") — real calendar date — for every pid, so
+      // self identity is same-kind and deterministic. Nothing here can pass via
+      // the Linux foreign-kind guard. Skipped on Windows: Bun cannot reliably
+      // force a Darwin identity stack there (platform/ps boundary).
+      const dir = storage();
+      const worker = spawnWorker(dir, "darwin-sim", "self-lstart", {
+        PLL_STARTTIME: "Sat Oct  3 09:00:00 2026",
+      });
+      const result = await worker.result;
+      expect([result.exitCode, result.stderr]).toEqual([0, ""]);
+      const own = result.parsed?.["ownStarttime"];
+      expect(own).toBe("darwin:Sat Oct  3 09:00:00 2026");
+      const variants = result.parsed?.["variants"] as Record<string, boolean>;
+      const tokens = result.parsed?.["tokens"] as Record<string, string | null>;
 
-    // Impossible calendar values behind a structurally matching prefix:
-    // every one parses under the attempt-1 regex ((\d{1,2}) admits 00/99,
-    // no month-length/leap/weekday logic) and would CAS-steal the live row.
-    for (const name of [
-      "day-99",
-      "day-00",
-      "feb29-nonleap", // 2026-02-29 rolls to Mar 1 (a Sunday!) — only the
-      // day-rollover check catches this one, not the weekday check
-      "apr31",
-      "mar32-rolls",
-      "weekday-mismatch", // real date Oct 2 2026, wrong weekday (Fri)
-      "leap-dow-mismatch", // real leap date Feb 29 2028, wrong weekday (Tue)
-      "empty",
-      "garbage",
-    ]) {
-      expect(variants[name]).toBe(false);
-      expect(tokens[name]).toBe(`planted-${name}`);
-    }
+      // Impossible calendar values behind a structurally matching prefix:
+      // every one parses under the attempt-1 regex ((\d{1,2}) admits 00/99,
+      // no month-length/leap/weekday logic) and would CAS-steal the live row.
+      for (const name of [
+        "day-99",
+        "day-00",
+        "feb29-nonleap", // 2026-02-29 rolls to Mar 1 (a Sunday!) — only the
+        // day-rollover check catches this one, not the weekday check
+        "apr31",
+        "mar32-rolls",
+        "weekday-mismatch", // real date Oct 2 2026, wrong weekday (Fri)
+        "leap-dow-mismatch", // real leap date Feb 29 2028, wrong weekday (Tue)
+        "empty",
+        "garbage",
+      ]) {
+        expect(variants[name]).toBe(false);
+        expect(tokens[name]).toBe(`planted-${name}`);
+      }
 
-    // Real dates must remain readable identities:
-    //  - the live owner's exact lstart is never stolen;
-    //  - leap Feb 29 2028 with its correct weekday is a valid different
-    //    identity → simulated PID-reuse reclaim;
-    //  - any other real date likewise reclaims.
-    expect(variants["exact-self"]).toBe(false);
-    expect(tokens["exact-self"]).toBe("planted-exact-self");
-    expect(variants["valid-leap-feb29-steal"]).toBe(true);
-    expect(variants["valid-different-date-steal"]).toBe(true);
-  }, 120_000);
+      // Real dates must remain readable identities:
+      //  - the live owner's exact lstart is never stolen;
+      //  - leap Feb 29 2028 with its correct weekday is a valid different
+      //    identity → simulated PID-reuse reclaim;
+      //  - any other real date likewise reclaims.
+      expect(variants["exact-self"]).toBe(false);
+      expect(tokens["exact-self"]).toBe("planted-exact-self");
+      expect(variants["valid-leap-feb29-steal"]).toBe(true);
+      expect(variants["valid-different-date-steal"]).toBe(true);
+    },
+    120_000
+  );
 
-  it("live Darwin ps garbage against a valid stored identity must not steal (simulated)", async () => {
-    // Self identity is a valid lstart; the foreign owner's live `ps` returns
-    // malformed text. Without live-read validation, inequality would CAS-steal.
-    const dir = storage();
-    const worker = spawnWorker(dir, "darwin-sim", "live-garbage", {
-      PLL_STARTTIME: "Sat Oct  3 09:00:00 2026",
-    });
-    const result = await worker.result;
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toBe("");
-    expect(result.parsed?.["ownStarttime"]).toBe("darwin:Sat Oct  3 09:00:00 2026");
-    expect(result.parsed?.["stolen"]).toBe(false);
-    expect(result.parsed?.["token"]).toBe("planted-live-ps-garbage");
-  }, 60_000);
+  it.skipIf(process.platform === "win32")(
+    "live Darwin ps garbage against a valid stored identity must not steal (simulated)",
+    async () => {
+      // Self identity is a valid lstart; the foreign owner's live `ps` returns
+      // malformed text. Without live-read validation, inequality would CAS-steal.
+      // Same Windows skip as the companion darwin-sim calendar suite above.
+      const dir = storage();
+      const worker = spawnWorker(dir, "darwin-sim", "live-garbage", {
+        PLL_STARTTIME: "Sat Oct  3 09:00:00 2026",
+      });
+      const result = await worker.result;
+      expect([result.exitCode, result.stderr]).toEqual([0, ""]);
+      expect(result.parsed?.["ownStarttime"]).toBe("darwin:Sat Oct  3 09:00:00 2026");
+      expect(result.parsed?.["stolen"]).toBe(false);
+      expect(result.parsed?.["token"]).toBe("planted-live-ps-garbage");
+    },
+    60_000
+  );
 
   it("an untrusted local boot_id never acts as a dead signal", async () => {
     // Worker forces the local boot identity reader to return garbage.
