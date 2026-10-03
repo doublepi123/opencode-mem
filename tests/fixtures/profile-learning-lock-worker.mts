@@ -26,6 +26,25 @@
  *   boot-variants  plant owner rows one at a time (valid-null, invalid-string,
  *                 number, object, same-as-host) and report acquire result for
  *                 each, releasing between attempts.
+ *   starttime-variants  plant owner rows one at a time exercising the stored
+ *                 starttime identity: strict format validation (bare
+ *                 `darwin:`, garbage, malformed lstart, non-numeric junk),
+ *                 cross-kind rows (a Darwin-format starttime inspected on a
+ *                 Linux host and vice versa), a live owner with its real
+ *                 local starttime, a null-starttime live owner (signal-probe
+ *                 fallback), and a genuine same-kind mismatch (PID reuse).
+ *                 Reports per case whether the lock was acquired and the
+ *                 owner_token observed after the attempt, proving non-steal
+ *                 cases leave the planted row untouched.
+ *   darwin-sim    run the whole identity stack with process.platform forced
+ *                 to "darwin" and node:child_process mocked so `ps`/`sysctl`
+ *                 return controlled lstart/boottime output. Plants same-kind
+ *                 Darwin owner rows — impossible dates (Oct 99, Oct 00, Feb
+ *                 30, Apr 31, Feb 29 non-leap, weekday mismatch) must fail
+ *                 closed while real dates (incl. leap Feb 29) stay usable,
+ *                 a live owner's exact lstart is not stolen, and a different
+ *                 valid lstart on a live PID is reclaimed as PID reuse.
+ *                 SQL/CAS run against a real temp coordination DB.
  *   cas-race      signal hs.ready.<label>; wait hs.go; attempt acquire
  *   stale-release acquire; flip owner_token to a simulated same-PID new owner;
  *                 call the OLD release; report whether the row survived
@@ -137,6 +156,63 @@ if (mode === "cas-race") {
     },
   }));
 }
+// darwin-sim: force the whole identity stack onto a simulated Darwin host.
+// The platform flip and the child_process mock (controlled `ps` lstart /
+// `sysctl` boottime) must be registered before learning-lock.js is imported.
+// The REAL @libsql/client binding was imported at module top (before any
+// platform tampering), so the coordination DB stays fully real even with
+// process.platform === "darwin" — only the process/child_process boundary is
+// mocked, never the SQL/CAS path.
+//
+// PLL_LABEL selects the scenario:
+//   self-lstart   PLL_STARTTIME controls the lstart returned for ANY pid
+//                 (self and owner alike): the simulated host's ps answers a
+//                 single controlled value, so same-kind comparisons are
+//                 deterministic and weekday-consistent.
+if (mode === "darwin-sim") {
+  const forcedSelfLstart = process.env.PLL_STARTTIME ?? null;
+  // Simulated host boot identity: sysctl kern.boottime → sec=1760000000.
+  // The owner rows planted in this mode intentionally keep boot_id NULL so
+  // boot comparison can never fire and the starttime paths are the only
+  // ones under test.
+  Object.defineProperty(process, "platform", { value: "darwin" });
+  mock.module("node:child_process", () => ({
+    ...importedChildProcess,
+    spawnSync: (command: any, args?: any, options?: any) => {
+      if (
+        command === "ps" &&
+        Array.isArray(args) &&
+        args.includes("-o") &&
+        args.includes("lstart=")
+      ) {
+        return {
+          status: 0,
+          stdout: forcedSelfLstart ?? "",
+          stderr: "",
+          pid: 0,
+          output: [],
+          signal: null,
+        };
+      }
+      if (
+        command === "sysctl" &&
+        Array.isArray(args) &&
+        args[0] === "-n" &&
+        args[1] === "kern.boottime"
+      ) {
+        return {
+          status: 0,
+          stdout: "{ sec = 1760000000, usec = 0 } Sat Oct  3 09:00:00 2026",
+          stderr: "",
+          pid: 0,
+          identity: [],
+          signal: null,
+        };
+      }
+      return realSpawnSync(command, args, options);
+    },
+  }));
+}
 const lock = await import(lockUrl);
 
 const barrier = (name: string) => join(storage, `hs.${name}`);
@@ -164,6 +240,33 @@ async function openDb() {
   });
   await client.execute("PRAGMA busy_timeout = 5000");
   return client;
+}
+
+async function readOwnerToken(): Promise<string | null> {
+  const db = await openDb();
+  try {
+    const result = await db.execute(
+      `SELECT owner_token FROM profile_learning_lock WHERE name = 'profile-learning'`
+    );
+    const row = result.rows[0] as Record<string, unknown> | undefined;
+    return row ? String(row["owner_token"]) : null;
+  } finally {
+    db.close();
+  }
+}
+
+/** Plants an owner row for THIS live worker pid with boot_id NULL. */
+async function dbExecutePlant(
+  db: ReturnType<typeof realCreateClient>,
+  caseName: string,
+  starttime: string | null
+): Promise<void> {
+  await db.execute({
+    sql: `INSERT OR REPLACE INTO profile_learning_lock
+            (name, owner_token, pid, boot_id, starttime, acquired_at)
+          VALUES ('profile-learning', ?, ?, NULL, ?, ?)`,
+    args: [`planted-${caseName}`, process.pid, starttime, Date.now()],
+  });
 }
 
 try {
@@ -323,6 +426,197 @@ try {
         if (release) await release();
       }
       out({ variants: results });
+      break;
+    }
+
+    case "starttime-variants": {
+      // Each case plants one owner row and attempts one acquire. Cases whose
+      // name ends in "-steal" assert the planted row is replaced; every other
+      // case must leave the planted owner_token untouched (fail-closed).
+      //
+      // pid 4194304 is 2^22, above every default pid_max, so its /proc entry
+      // is absent and kill(0) yields ESRCH — genuinely dead, making the
+      // starttime checks the only thing standing between it and theft.
+      //
+      // Cases keyed to local identity use this live worker's pid. The worker
+      // itself is the live holder, so a no-steal outcome proves the live
+      // check engaged rather than a parse refusal.
+      const cases: Array<{
+        name: string;
+        pid: number;
+        starttime: string | null;
+      }> = [
+        { name: "bare-darwin-prefix", pid: 4194304, starttime: "darwin:" },
+        { name: "darwin-garbage-suffix", pid: 4194304, starttime: "darwin:garbage" },
+        {
+          name: "darwin-malformed-lstart",
+          pid: 4194304,
+          starttime: "darwin:not-a-date-at-all",
+        },
+        {
+          name: "darwin-partial-lstart",
+          pid: 4194304,
+          starttime: "darwin:Sat Oct 3",
+        },
+        {
+          name: "darwin-24h-violation",
+          pid: 4194304,
+          starttime: "darwin:Sat Oct  3 25:61:61 2026",
+        },
+        { name: "empty-string", pid: 4194304, starttime: "" },
+        { name: "prefix-numeric-junk", pid: 4194304, starttime: "darwin:12345" },
+      ];
+      // Platform-identity cases, appended only where the host provides a
+      // starttime identity. "Foreign" = the OTHER platform's valid producer
+      // format — well-formed, but not comparable with this host's kind, so
+      // it must never generate a dead assertion on its own.
+      const ownStarttime = lock.getProfileLearningStarttime(process.pid);
+      if (ownStarttime) {
+        const darwinHost = ownStarttime.startsWith("darwin:");
+        const foreignLive = darwinHost ? "12345678" : "darwin:Sat Oct  3 09:00:00 2026";
+        const foreignDead = darwinHost ? "87654321" : "darwin:Sun Nov 16 10:11:12 2025";
+        const localDeadStarttime = darwinHost ? "darwin:Sun Nov 16 10:11:12 2025" : "12345678";
+        cases.push(
+          // The Gate 1 regression: a LIVE holder whose stored starttime is a
+          // valid foreign-platform format. On upstream, the host's stat
+          // comparison is always unequal across formats (numeric ticks vs
+          // darwin lstart text) and the mismatch fired the PID-reuse steal.
+          { name: "foreign-kind-live-owner", pid: process.pid, starttime: foreignLive },
+          // Same on a provably dead PID (2^22, above every pid_max): an
+          // incomparable identity still may not produce the dead assertion.
+          { name: "foreign-kind-dead-pid", pid: 4194304, starttime: foreignDead },
+          // Control: a LOCAL-kind starttime on a provably dead PID is the
+          // normal recovery path (absent /proc → kill probe ESRCH) and must
+          // still reclaim — the fix must not over-block real recovery.
+          { name: "local-kind-dead-pid-steal", pid: 4194304, starttime: localDeadStarttime },
+          // Live owner, its exact own starttime: never reclaimed.
+          { name: "live-owner-real-starttime", pid: process.pid, starttime: ownStarttime },
+          // Live owner, null starttime: the signal-probe fallback decides
+          // (alive), exercising the nullable path.
+          { name: "live-owner-null-starttime", pid: process.pid, starttime: null },
+          // Live owner, valid local-kind starttime from a previous
+          // inhabitant of this PID: legitimate PID-reuse reclaim.
+          {
+            name: "same-kind-mismatch-steal",
+            pid: process.pid,
+            starttime: darwinHost
+              ? ownStarttime.replace(/\d{2}:\d{2}:\d{2}/, (t) =>
+                  t === "23:59:59" ? "00:00:00" : "23:59:59"
+                )
+              : ownStarttime === "1"
+                ? "2"
+                : "1",
+          }
+        );
+      }
+      const results: Record<string, unknown> = {};
+      const tokens: Record<string, string | null> = {};
+      for (const c of cases) {
+        const db = await openDb();
+        try {
+          await db.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+            name TEXT PRIMARY KEY,
+            owner_token TEXT NOT NULL,
+            pid INTEGER NOT NULL,
+            boot_id TEXT,
+            starttime TEXT,
+            acquired_at INTEGER NOT NULL
+          )`);
+          await db.execute({
+            sql: `INSERT OR REPLACE INTO profile_learning_lock
+                    (name, owner_token, pid, boot_id, starttime, acquired_at)
+                  VALUES ('profile-learning', ?, ?, NULL, ?, ?)`,
+            args: [`planted-${c.name}`, c.pid, c.starttime, Date.now()],
+          });
+        } finally {
+          db.close();
+        }
+        const release = await lock.tryAcquireProfileLearningLock("/project-starttime");
+        results[c.name] = release !== null;
+        tokens[c.name] = await readOwnerToken();
+        if (release) await release();
+      }
+      out({ variants: results, tokens });
+      break;
+    }
+
+    case "darwin-sim": {
+      // Same-kind Darwin starttime validation on a simulated Darwin host
+      // (platform forced, ps/sysctl mocked at the process boundary). Every
+      // planted row is same-kind: the Linux foreign-kind guard cannot be the
+      // reason any case here passes.
+      //
+      // Lstart calendar notes (weekday values are real, verified against the
+      // UTC calendar so a rejection can only come from date validation):
+      //   Sat Oct  3 09:00:00 2026   — real date, this sim's "self" value
+      //   Sat Oct 99 09:00:00 2026   — day 99: impossible in October
+      //   Sat Oct  0 09:00:00 2026   — day 0: impossible
+      //   Sun Feb 29 09:00:00 2026   — 2026 is not a leap year
+      //   Wed Feb 29 09:00:00 2028   — real leap date (Feb 29 2028 is Tue!)
+      //   Tue Feb 29 09:00:00 2028   — real leap date, correct weekday
+      //   Thu Apr 31 09:00:00 2027   — April has 30 days
+      //   Mon Mar 32 09:00:00 2026   — day rolls into April
+      //   Fri Oct  2 09:00:00 2026   — real date but Oct 2 2026 is a Friday
+      //   Sun Nov 16 10:11:12 2025   — real date, different from self
+      //
+      // PLL_LABEL = self-lstart: the simulated ps returns PLL_STARTTIME for
+      // every pid, so the "current" identity is that exact valid lstart and
+      // same-kind comparisons are deterministic. Owner rows are planted on
+      // THIS live worker pid with boot_id NULL.
+      const ownStarttime = lock.getProfileLearningStarttime(process.pid);
+      if (!ownStarttime) {
+        console.error("darwin-sim requires the simulated ps to yield a valid lstart");
+        process.exit(1);
+      }
+      const cases: Array<{ name: string; starttime: string | null; steal?: boolean }> = [
+        // Impossible dates — same-kind rows that must fail closed.
+        { name: "day-99", starttime: "darwin:Sat Oct 99 09:00:00 2026" },
+        { name: "day-00", starttime: "darwin:Sat Oct  0 09:00:00 2026" },
+        { name: "feb29-nonleap", starttime: "darwin:Sun Feb 29 09:00:00 2026" },
+        { name: "apr31", starttime: "darwin:Thu Apr 31 09:00:00 2027" },
+        { name: "mar32-rolls", starttime: "darwin:Mon Mar 32 09:00:00 2026" },
+        { name: "weekday-mismatch", starttime: "darwin:Mon Oct  2 09:00:00 2026" },
+        { name: "leap-dow-mismatch", starttime: "darwin:Wed Feb 29 09:00:00 2028" },
+        { name: "empty", starttime: "" },
+        { name: "garbage", starttime: "not-even-prefixed" },
+        // Valid dates — must remain readable (no steal on the live owner's
+        // exact identity; a different valid lstart on a live pid is the
+        // simulated PID-reuse reclaim; leap Feb 29 2028 is a real date).
+        { name: "exact-self", starttime: ownStarttime },
+        {
+          name: "valid-leap-feb29-steal",
+          starttime: "darwin:Tue Feb 29 09:00:00 2028",
+          steal: true,
+        },
+        {
+          name: "valid-different-date-steal",
+          starttime: "darwin:Sun Nov 16 10:11:12 2025",
+          steal: true,
+        },
+      ];
+      const results: Record<string, boolean> = {};
+      const tokens: Record<string, string | null> = {};
+      for (const c of cases) {
+        const db = await openDb();
+        try {
+          await db.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+            name TEXT PRIMARY KEY,
+            owner_token TEXT NOT NULL,
+            pid INTEGER NOT NULL,
+            boot_id TEXT,
+            starttime TEXT,
+            acquired_at INTEGER NOT NULL
+          )`);
+          await dbExecutePlant(db, c.name, c.starttime);
+        } finally {
+          db.close();
+        }
+        const release = await lock.tryAcquireProfileLearningLock("/project-darwin-sim");
+        results[c.name] = release !== null;
+        tokens[c.name] = await readOwnerToken();
+        if (release) await release();
+      }
+      out({ ownStarttime, variants: results, tokens });
       break;
     }
 

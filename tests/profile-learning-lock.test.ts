@@ -58,10 +58,15 @@ interface WorkerProc {
   exited: Promise<number>;
 }
 
-function spawnWorker(dir: string, mode: string, label = "x"): WorkerProc {
+function spawnWorker(
+  dir: string,
+  mode: string,
+  label = "x",
+  extraEnv: Record<string, string> = {}
+): WorkerProc {
   const proc = Bun.spawn({
     cmd: [process.execPath, WORKER],
-    env: { ...process.env, PLL_STORAGE: dir, PLL_MODE: mode, PLL_LABEL: label },
+    env: { ...process.env, PLL_STORAGE: dir, PLL_MODE: mode, PLL_LABEL: label, ...extraEnv },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -153,6 +158,32 @@ function readStarttime(pid: number): string {
     throw new Error(`no starttime identity for pid ${pid} on this platform`);
   }
   return starttime;
+}
+
+/**
+ * A VALID current-platform starttime that is simply not this process's:
+ * numeric ticks on Linux ("1" — a real field-22 value no modern process
+ * has), or a real calendar date behind the darwin prefix on Darwin. Kind is
+ * always the local one so the same-kind mismatch path is exercised.
+ */
+function localKindMismatchStarttime(): string {
+  if (LOCAL_START_TIME?.startsWith("darwin:")) {
+    return "darwin:Sun Nov 16 10:11:12 2025";
+  }
+  return "1";
+}
+
+/**
+ * A VALID current-platform starttime for a dead-pid row: same kind as the
+ * host's, well-formed, but guaranteed to differ from anything the host
+ * could read for a live process (used with pid 4194304, which is above
+ * every default pid_max and therefore never alive).
+ */
+function localKindDeadPidStarttime(): string {
+  if (LOCAL_START_TIME?.startsWith("darwin:")) {
+    return "darwin:Sun Nov 16 10:11:12 2025";
+  }
+  return "12345678";
 }
 
 async function currentOwnerToken(dir: string): Promise<string | null> {
@@ -300,11 +331,14 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
     const dir = storage();
     // This test process is alive, but the recorded starttime belongs to a
     // previous inhabitant of this PID — reuse must be detected by identity,
-    // not by age (acquired_at is fresh).
+    // not by age (acquired_at is fresh). The planted value must be a VALID
+    // current-platform starttime (kind guard makes a foreign-format value a
+    // non-comparable no-steal row, which is covered separately; this case
+    // exercises the same-kind mismatch path).
     await plantOwner(dir, {
       pid: process.pid,
       bootId: HAS_BOOT_IDENTITY ? readBootId() : null,
-      starttime: "1",
+      starttime: localKindMismatchStarttime(),
       acquiredAt: Date.now(),
     });
 
@@ -345,9 +379,11 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
 
   it("proc ENOENT alone never kills; only the kill probe decides", async () => {
     // Owner pid 4194304 → /proc/<pid>/stat absent in every environment.
-    // A non-null starttime makes the checker take the proc-stat branch and
-    // hit the absent → kill-probe fallthrough for real (a null starttime
-    // would take the direct signal-probe path instead).
+    // A non-null CURRENT-PLATFORM-KIND starttime makes the checker take the
+    // proc-stat branch and hit the absent → kill-probe fallthrough for real
+    // (a null starttime would take the direct signal-probe path instead,
+    // and a foreign-kind value would correctly no-steal via the kind guard
+    // — neither exercises this path).
     // PLL_LABEL injects the exact kill(0) outcome in-process:
     //   EPERM (hidepid=2 live holder) → false
     //   OK    (live)                   → false
@@ -357,7 +393,7 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
       const caseDir = storage();
       await plantOwner(caseDir, {
         pid: 4194304,
-        starttime: "999999",
+        starttime: localKindDeadPidStarttime(),
         acquiredAt: Date.now(),
       });
       const worker = spawnWorker(caseDir, "proc-probe", forced);
@@ -384,6 +420,106 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
       sameAsHost: false,
     });
   }, 60_000);
+
+  it("stored starttime identity: strict format, cross-kind never kills, only same-kind mismatch reclaims", async () => {
+    // Worker plants each owner row variant and attempts one acquire.
+    // The key cases here are upstream regressions Oracle flagged in Gate 1:
+    // a Linux host must not CAS-steal a live owner merely because its stored
+    // starttime carries the darwin: prefix and therefore "differs" from the
+    // host's numeric /proc starttime; malformed prefixed values (bare
+    // `darwin:`, `darwin:garbage`) must fail closed at parse time.
+    const dir = storage();
+    const result = await spawnWorker(dir, "starttime-variants").result;
+    expect(result.exitCode).toBe(0);
+    const variants = result.parsed?.["variants"] as Record<string, boolean>;
+    const tokens = result.parsed?.["tokens"] as Record<string, string | null>;
+
+    // Format validation: fail closed, planted row untouched.
+    for (const name of [
+      "bare-darwin-prefix",
+      "darwin-garbage-suffix",
+      "darwin-malformed-lstart",
+      "darwin-partial-lstart",
+      "darwin-24h-violation",
+      "empty-string",
+      "prefix-numeric-junk",
+    ]) {
+      expect(variants[name]).toBe(false);
+      expect(tokens[name]).toBe(`planted-${name}`);
+    }
+
+    // Platform-identity-gated cases (only present when host provides one).
+    if ("live-owner-real-starttime" in variants) {
+      // The Gate 1 regression: a live holder with a valid foreign-platform
+      // starttime must never be CAS-stolen via a bogus "PID reuse" mismatch.
+      expect(variants["foreign-kind-live-owner"]).toBe(false);
+      expect(tokens["foreign-kind-live-owner"]).toBe("planted-foreign-kind-live-owner");
+      // Incomparable identity on a dead PID still never asserts death by
+      // itself (the lock simply is not reclaimed through this row).
+      expect(variants["foreign-kind-dead-pid"]).toBe(false);
+      expect(tokens["foreign-kind-dead-pid"]).toBe("planted-foreign-kind-dead-pid");
+      // Control: same-kind identity on a genuinely dead PID must still
+      // recover the lock (fix must not over-block legitimate recovery).
+      expect(variants["local-kind-dead-pid-steal"]).toBe(true);
+      // Live owner with its exact own starttime: never reclaimed.
+      expect(variants["live-owner-real-starttime"]).toBe(false);
+      expect(tokens["live-owner-real-starttime"]).toBe("planted-live-owner-real-starttime");
+      // Null starttime on a live owner: signal-probe fallback decides alive.
+      expect(variants["live-owner-null-starttime"]).toBe(false);
+      expect(tokens["live-owner-null-starttime"]).toBe("planted-live-owner-null-starttime");
+      // Valid local-kind starttime of a previous PID inhabitant: reclaim.
+      expect(variants["same-kind-mismatch-steal"]).toBe(true);
+    }
+  }, 180_000);
+
+  it("same-kind Darwin starttime: impossible dates fail closed, real dates stay usable (simulated darwin host)", async () => {
+    // Runs on Linux: the child fixture forces process.platform="darwin" and
+    // mocks ONLY the ps/sysctl boundary (real @libsql driver imported before
+    // the flip; SQL/CAS run against a real temp coordination DB). The mocked
+    // ps answers one controlled valid lstart ("Sat Oct  3 09:00:00 2026") —
+    // real calendar date — for every pid, so self identity is same-kind and
+    // deterministic. Nothing here can pass via the Linux foreign-kind guard.
+    const dir = storage();
+    const worker = spawnWorker(dir, "darwin-sim", "self-lstart", {
+      PLL_STARTTIME: "Sat Oct  3 09:00:00 2026",
+    });
+    const result = await worker.result;
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    const own = result.parsed?.["ownStarttime"];
+    expect(own).toBe("darwin:Sat Oct  3 09:00:00 2026");
+    const variants = result.parsed?.["variants"] as Record<string, boolean>;
+    const tokens = result.parsed?.["tokens"] as Record<string, string | null>;
+
+    // Impossible calendar values behind a structurally matching prefix:
+    // every one parses under the attempt-1 regex ((\d{1,2}) admits 00/99,
+    // no month-length/leap/weekday logic) and would CAS-steal the live row.
+    for (const name of [
+      "day-99",
+      "day-00",
+      "feb29-nonleap", // 2026-02-29 rolls to Mar 1 (a Sunday!) — only the
+      // day-rollover check catches this one, not the weekday check
+      "apr31",
+      "mar32-rolls",
+      "weekday-mismatch", // real date Oct 2 2026, wrong weekday (Fri)
+      "leap-dow-mismatch", // real leap date Feb 29 2028, wrong weekday (Tue)
+      "empty",
+      "garbage",
+    ]) {
+      expect(variants[name]).toBe(false);
+      expect(tokens[name]).toBe(`planted-${name}`);
+    }
+
+    // Real dates must remain readable identities:
+    //  - the live owner's exact lstart is never stolen;
+    //  - leap Feb 29 2028 with its correct weekday is a valid different
+    //    identity → simulated PID-reuse reclaim;
+    //  - any other real date likewise reclaims.
+    expect(variants["exact-self"]).toBe(false);
+    expect(tokens["exact-self"]).toBe("planted-exact-self");
+    expect(variants["valid-leap-feb29-steal"]).toBe(true);
+    expect(variants["valid-different-date-steal"]).toBe(true);
+  }, 120_000);
 
   it("an untrusted local boot_id never acts as a dead signal", async () => {
     // Worker forces the local boot identity reader to return garbage.
