@@ -26,6 +26,7 @@
   import { setI18nContext } from "$lib/i18n/context.svelte";
   import { getDisplayedMemoryCount } from "$lib/memory-count";
   import { initRouter, navigate, ROUTES, shouldHandleSpaClick } from "$lib/router";
+  import { appPath } from "$lib/base-path";
   import { createRouter } from "$lib/router.svelte";
   import { createMemoriesExplorer } from "$lib/stores/memories-explorer.svelte";
   import { createUserProfile } from "$lib/stores/user-profile.svelte";
@@ -189,7 +190,7 @@
         </Button>
         <h1 class="min-w-0 flex-1 truncate text-xl font-bold tracking-tight text-foreground-bright">
           <a
-            href={ROUTES.home}
+            href={appPath(ROUTES.home)}
             class="hover:opacity-90 md:pointer-events-none"
             onclick={onHomeClick}
           >

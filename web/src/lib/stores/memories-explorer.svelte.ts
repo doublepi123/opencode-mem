@@ -1,5 +1,6 @@
 import { toast } from "$lib/toast/toast.svelte";
 import { fetchAPI, toastApiResult } from "$lib/api";
+import { appPath } from "$lib/base-path";
 import { deleteSelectedMemories } from "$lib/bulk-delete";
 import { askConfirm } from "$lib/confirm.svelte";
 import { groupMemories } from "$lib/group-memories";
@@ -143,7 +144,7 @@ export function createMemoriesExplorer() {
 
   async function checkAuthWarning() {
     try {
-      const response = await fetch("/api/health", { credentials: "same-origin" });
+      const response = await fetch(appPath("/api/health"), { credentials: "same-origin" });
       if (!response.ok) return;
       const data = await response.json();
       const authEnabled = data?.authEnabled === true;

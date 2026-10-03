@@ -9,6 +9,7 @@
   import GithubIcon from "$lib/components/icons/GithubIcon.svelte";
   import Button from "$lib/components/ui/button.svelte";
   import { navigate, ROUTES, shouldHandleSpaClick, type AppView } from "$lib/router";
+  import { appPath } from "$lib/base-path";
   import { createTheme } from "$lib/theme.svelte";
   import { toggleTheme } from "$lib/theme";
   import {
@@ -107,7 +108,7 @@
     )}
   >
     <a
-      href={ROUTES.home}
+      href={appPath(ROUTES.home)}
       class={cn(
         "flex min-w-0 items-center rounded-xl transition-colors hover:opacity-90 focus-ring",
         iconOnly ? "justify-center" : cn("flex-1", GAP_LOOSE)
@@ -138,7 +139,7 @@
 
   <nav class="flex flex-1 flex-col gap-1 p-2" aria-label="Main">
     <a
-      href={ROUTES.project}
+      href={appPath(ROUTES.project)}
       class={navClass(currentView === "project")}
       aria-current={currentView === "project" ? "page" : undefined}
       title={projectLabel}
@@ -151,7 +152,7 @@
       {/if}
     </a>
     <a
-      href={ROUTES.profile}
+      href={appPath(ROUTES.profile)}
       class={navClass(currentView === "profile")}
       aria-current={currentView === "profile" ? "page" : undefined}
       title={profileLabel}

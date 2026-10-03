@@ -1,3 +1,4 @@
+import { appPath, stripBase } from "./base-path";
 import {
   normalizePath,
   pathForView,
@@ -8,7 +9,7 @@ import {
 } from "./routes";
 
 let currentPath = resolveAppPath(
-  typeof window !== "undefined" ? window.location.pathname : ROUTES.project
+  typeof window !== "undefined" ? stripBase(window.location.pathname) : ROUTES.project
 );
 const listeners = new Set<() => void>();
 
@@ -47,12 +48,13 @@ export function shouldHandleSpaClick(event: MouseEvent): boolean {
 
 export function navigate(to: string, replace = false) {
   const next = resolveAppPath(to);
-  if (normalizePath(window.location.pathname) === next) {
+  if (normalizePath(stripBase(window.location.pathname)) === next) {
     setPath(next);
     return;
   }
-  if (replace) window.history.replaceState({}, "", next);
-  else window.history.pushState({}, "", next);
+  const url = appPath(next);
+  if (replace) window.history.replaceState({}, "", url);
+  else window.history.pushState({}, "", url);
   setPath(next);
 }
 
@@ -61,16 +63,18 @@ export function navigateView(view: AppView, replace = false) {
 }
 
 export function currentView(): AppView {
-  return viewFromPath(typeof window !== "undefined" ? window.location.pathname : currentPath);
+  return viewFromPath(
+    typeof window !== "undefined" ? stripBase(window.location.pathname) : currentPath
+  );
 }
 
 /** Sync store with history; `/` and unknown paths resolve to project memories. */
 export function initRouter(): () => void {
   const sync = () => {
-    const current = normalizePath(window.location.pathname);
+    const current = normalizePath(stripBase(window.location.pathname));
     const resolved = resolveAppPath(current);
     if (current !== resolved) {
-      window.history.replaceState({}, "", resolved);
+      window.history.replaceState({}, "", appPath(resolved));
     }
     setPath(resolved);
   };

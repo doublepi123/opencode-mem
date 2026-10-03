@@ -7,6 +7,21 @@ import { opencodeMemSimPlugin } from "./vite-plugins/opencode-mem-sim.ts";
 const webRoot = import.meta.dirname;
 const simEnabled = process.env.OPENCODE_MEM_SIM === "1";
 
+/**
+ * Deploy-time base path. Default "/" keeps the upstream root deployment
+ * unchanged. A fork deployment behind a reverse proxy that strips a URL
+ * prefix (e.g. nginx /mem/ → backend root) builds with
+ * OPENCODE_MEM_WEB_BASE=/mem/ so asset URLs match the public prefix.
+ */
+function webBase(): string {
+  const raw = process.env.OPENCODE_MEM_WEB_BASE ?? "/";
+  let base = raw.trim();
+  if (!base) return "/";
+  if (!base.startsWith("/")) base = `/${base}`;
+  if (!base.endsWith("/")) base = `${base}/`;
+  return base;
+}
+
 export default defineConfig({
   plugins: [
     svelte(),
@@ -35,5 +50,5 @@ export default defineConfig({
     outDir: path.resolve(webRoot, "../dist/web"),
     emptyOutDir: true,
   },
-  base: "/",
+  base: webBase(),
 });

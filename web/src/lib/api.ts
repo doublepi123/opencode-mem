@@ -1,5 +1,6 @@
 import { toast } from "$lib/toast/toast.svelte";
 import type { ApiResult } from "$shared/api";
+import { appPath } from "./base-path";
 import { t, type TranslateFn } from "./i18n";
 
 declare global {
@@ -45,7 +46,9 @@ export async function fetchAPI<T = unknown>(
       (options.method === "POST" && endpoint.includes("/ai-cleanup") ? 180000 : 60000);
     const { timeout: _timeout, headers: extraHeaders, ...fetchOptions } = options;
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-    const response = await fetch(endpoint, {
+    // appPath keeps the default "/" build byte-identical while enabling
+    // sub-path deployments (/api/... → <base>/api/...).
+    const response = await fetch(appPath(endpoint), {
       ...fetchOptions,
       headers: mergeHeaders(fetchOptions.body, extraHeaders),
       signal: controller.signal,
