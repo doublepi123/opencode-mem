@@ -302,6 +302,12 @@ mock.module(${JSON.stringify(u("src/services/tags.js"))}, () => ({
 
 let releaseA;
 const gateA = new Promise((res) => { releaseA = res; });
+// Resolves when A's LLM call has actually been entered (and is parked on the
+// gate). Waiting on this instead of a fixed wall-clock settle keeps the
+// duringBlock snapshot deterministic on slow runners (Windows CI: query+claim
+// had completed within 30ms but the LLM entry had not).
+let llmEnteredResolve;
+const llmEntered = new Promise((res) => { llmEnteredResolve = res; });
 const llmOrder = [];
 mock.module(${JSON.stringify(u("src/services/ai/opencode-provider-loader.js"))}, () => ({
   loadOpencodeProvider: async () => ({
@@ -310,7 +316,7 @@ mock.module(${JSON.stringify(u("src/services/ai/opencode-provider-loader.js"))},
     generateStructuredOutput: async ({ userPrompt }) => {
       const sid = userPrompt.includes("Fix login bug") ? "sess-A" : "sess-B";
       llmOrder.push(sid); bump(counts.llm, sid);
-      if (sid === "sess-A") await gateA;
+      if (sid === "sess-A") { llmEnteredResolve(); await gateA; }
       return { summary: "stub " + sid, type: "discussion", tags: [] };
     },
   }),
@@ -337,7 +343,7 @@ const { performAutoCapture } = await import(${JSON.stringify(u("src/services/aut
 
 // 1) A starts; its LLM call parks on the gate.
 const aPromise = performAutoCapture(ctxFor("sess-A"), "sess-A", "/w");
-await settle(30);
+await llmEntered;
 const duringBlock = JSON.parse(JSON.stringify(counts));
 
 // 2) B's idle fires while A is in flight — B must QUEUE, not be dropped.
