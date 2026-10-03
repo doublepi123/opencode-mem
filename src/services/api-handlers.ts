@@ -3,7 +3,7 @@ import { tursoShardManager } from "./turso/shard-manager.js";
 import { tursoVectorSearch } from "./turso/vector-search.js";
 import { tursoConnectionManager } from "./turso/connection-manager.js";
 import { ensureTursoReady } from "./turso/ready.js";
-import { formatTagsForEmbedding } from "./turso/vector-utils.js";
+import { formatTagsForEmbedding, parseSessionIdFromMetadata } from "./turso/vector-utils.js";
 import { extractScopeFromContainerTag, tryExtractScopeFromContainerTag } from "./memory-scope.js";
 import { log } from "./logger.js";
 import { CONFIG } from "../config.js";
@@ -529,8 +529,8 @@ export async function handleUpdateMemory(
         sql: `
         INSERT INTO memories (
           id, content, vector, tags_vector, container_tag, tags, type, created_at, updated_at,
-          metadata, display_name, user_name, user_email, project_path, project_name, git_repo_url
-        ) VALUES (?, ?, vector32(?), ${tagsVector ? "vector32(?)" : "NULL"}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          metadata, session_id, display_name, user_name, user_email, project_path, project_name, git_repo_url
+        ) VALUES (?, ?, vector32(?), ${tagsVector ? "vector32(?)" : "NULL"}, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `,
         args: [
           id,
@@ -543,6 +543,11 @@ export async function handleUpdateMemory(
           Number(existingMemory.created_at),
           Date.now(),
           existingMemory.metadata ? String(existingMemory.metadata) : null,
+          existingMemory.session_id
+            ? String(existingMemory.session_id)
+            : parseSessionIdFromMetadata(
+                existingMemory.metadata ? String(existingMemory.metadata) : null
+              ),
           existingMemory.display_name ? String(existingMemory.display_name) : null,
           existingMemory.user_name ? String(existingMemory.user_name) : null,
           existingMemory.user_email ? String(existingMemory.user_email) : null,

@@ -95,7 +95,9 @@ async function dumpAndReloadEncrypted(dbPath: string): Promise<void> {
       `SELECT name FROM sqlite_master
        WHERE type = 'table'
          AND name NOT LIKE 'sqlite_%'
-         AND name NOT LIKE '__turso_internal_%'`
+         AND name NOT LIKE '__turso_internal_%'
+         AND name NOT LIKE '%_fts%'
+         AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'`
     );
     const tableNames = tables.map((row) => String(row.name));
     for (const table of tableNames) {

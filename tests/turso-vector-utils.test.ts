@@ -1,7 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import {
   distanceToSimilarity,
+  escapeLikePattern,
   formatTagsForEmbedding,
+  parseSessionIdFromMetadata,
+  tokenizeQueryText,
 } from "../src/services/turso/vector-utils.js";
 
 describe("turso vector utils", () => {
@@ -15,5 +18,12 @@ describe("turso vector utils", () => {
 
   it("formats tag embedding text consistently", () => {
     expect(formatTagsForEmbedding(["auth", "jwt"])).toBe("Topics: auth, jwt");
+  });
+
+  it("tokenizes query text and escapes LIKE wildcards", () => {
+    expect(tokenizeQueryText("Hello, world_test")).toEqual(["hello", "world", "test"]);
+    expect(escapeLikePattern("100%_done")).toBe("100\\%\\_done");
+    expect(parseSessionIdFromMetadata(JSON.stringify({ sessionID: "s1" }))).toBe("s1");
+    expect(parseSessionIdFromMetadata("{bad")).toBeNull();
   });
 });

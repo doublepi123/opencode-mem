@@ -55,7 +55,9 @@ import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import * as importedFs from "node:fs";
 import * as importedChildProcess from "node:child_process";
-import * as importedLibsql from "@libsql/client";
+import { connect } from "@tursodatabase/database";
+import { TursoDb } from "../../src/services/turso/turso-db.js";
+import { tursoExperimentalFeatures } from "../../src/services/turso/connection-manager.js";
 
 const storage = process.env.PLL_STORAGE;
 const mode = process.env.PLL_MODE;
@@ -65,12 +67,10 @@ if (!storage || !mode) {
   process.exit(2);
 }
 
-// Captured BEFORE any mock.module call: once "node:fs" / "@libsql/client"
-// are mocked, re-importing them inside a factory would resolve the mock and
-// recurse. These constants pin the real live bindings for the wrappers.
+// Captured BEFORE any mock.module call: once "node:fs" is mocked,
+// re-importing inside a factory would resolve the mock and recurse.
 const realReadFileSync = importedFs.readFileSync;
 const realSpawnSync = importedChildProcess.spawnSync;
-const realCreateClient = importedLibsql.createClient;
 
 const configUrl = new URL("../../src/config.js", import.meta.url).href;
 const loggerUrl = new URL("../../src/services/logger.js", import.meta.url).href;
@@ -117,49 +117,14 @@ if (mode === "current-boot-invalid") {
       return realSpawnSync(command, args, options);
     },
   }));
-}
-// cas-race: wrap the REAL @libsql/client so both competitors provably act
-// on the same stale SELECT snapshot. The wrapper records the owner_token
-// each side's SELECT observed, and parks each side's UPDATE (the CAS)
-// behind a parent-controlled file gate. SQL execution stays 100% real;
-// only the interleaving is staged. Registered before learning-lock.js is
-// imported so the module under test picks up the wrapped client.
-let casSeenToken: string | null = null;
-let casLabel = "";
-if (mode === "cas-race") {
-  casLabel = label;
-  mock.module("@libsql/client", () => ({
-    ...importedLibsql,
-    createClient: (opts: any) => {
-      const client = realCreateClient(opts);
-      return {
-        ...client,
-        execute: async (stmt: any) => {
-          const sql: string = typeof stmt === "string" ? stmt : stmt.sql;
-          if (/^UPDATE\s+profile_learning_lock/i.test(sql)) {
-            // Both sides have read the same stale row; announce it and
-            // wait for the parent's gate before the CAS fires.
-            signal(barrier(`seen.${casLabel}`));
-            await waitFile(barrier("go.update"));
-          }
-          const result = await client.execute(stmt);
-          const after: string = typeof stmt === "string" ? stmt : stmt.sql;
-          if (/^SELECT\s+owner_token/i.test(after)) {
-            const row = result.rows[0] as Record<string, unknown> | undefined;
-            casSeenToken = row ? String(row["owner_token"]) : null;
-            writeFileSync(barrier(`token.${casLabel}`), casSeenToken ?? "none");
-          }
-          return result;
-        },
-        close: () => client.close(),
-      };
-    },
   }));
 }
+// cas-race interleaving is driven by PLL_CAS_HOOKS=1 inside learning-lock
+// (select writes token.<label>, update parks on go.update) — no client mock.
 // darwin-sim: force the whole identity stack onto a simulated Darwin host.
 // The platform flip and the child_process mock (controlled `ps` lstart /
 // `sysctl` boottime) must be registered before learning-lock.js is imported.
-// The REAL @libsql/client binding was imported at module top (before any
+// The REAL Turso DB binding was imported at module top (before any
 // platform tampering), so the coordination DB stays fully real even with
 // process.platform === "darwin" — only the process/child_process boundary is
 // mocked, never the SQL/CAS path.
@@ -245,11 +210,12 @@ function out(payload: Record<string, unknown>): void {
 }
 
 async function openDb() {
-  const client = realCreateClient({
-    url: `file:${join(storage, ".profile-learning-coordination.db")}`,
+  const native = await connect(join(storage, ".profile-learning-coordination.db"), {
+    experimental: tursoExperimentalFeatures(),
   });
-  await client.execute("PRAGMA busy_timeout = 5000");
-  return client;
+  const db = new TursoDb(native);
+  await db.run("PRAGMA busy_timeout = 5000");
+  return db;
 }
 
 async function readOwnerToken(): Promise<string | null> {
@@ -261,22 +227,22 @@ async function readOwnerToken(): Promise<string | null> {
     const row = result.rows[0] as Record<string, unknown> | undefined;
     return row ? String(row["owner_token"]) : null;
   } finally {
-    db.close();
+    await db.close();
   }
 }
 
 /** Plants an owner row for THIS live worker pid with boot_id NULL. */
 async function dbExecutePlant(
-  db: ReturnType<typeof realCreateClient>,
+  db: TursoDb,
   caseName: string,
   starttime: string | null
 ): Promise<void> {
-  await db.execute({
-    sql: `INSERT OR REPLACE INTO profile_learning_lock
+  await db.run(
+    `INSERT OR REPLACE INTO profile_learning_lock
             (name, owner_token, pid, boot_id, starttime, acquired_at)
           VALUES ('profile-learning', ?, ?, NULL, ?, ?)`,
-    args: [`planted-${caseName}`, process.pid, starttime, Date.now()],
-  });
+    [`planted-${caseName}`, process.pid, starttime, Date.now()]
+  );
 }
 
 try {
@@ -330,10 +296,9 @@ try {
     case "cas-race": {
       signal(barrier(`ready.${label}`));
       await waitFile(barrier("go"));
-      // Inside acquire (wrapped @libsql/client): INSERT fails → SELECT reads
-      // the stale row (wrapper writes token.<label>) → UPDATE parks on the
-      // parent's go.update gate, so both CAS attempts are provably against
-      // the same observed stale token before either fires.
+      // Inside acquire (PLL_CAS_HOOKS): INSERT fails → SELECT records
+      // token.<label> → UPDATE parks on go.update, so both CAS attempts are
+      // provably against the same observed stale token before either fires.
       const release = await lock.tryAcquireProfileLearningLock("/project-race");
       signal(barrier(`attempted.${label}`));
       out({ acquired: release !== null });
@@ -405,7 +370,7 @@ try {
       for (const v of variants) {
         const db = await openDb();
         try {
-          await db.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+          await db.run(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
             name TEXT PRIMARY KEY,
             owner_token TEXT NOT NULL,
             pid INTEGER NOT NULL,
@@ -417,19 +382,19 @@ try {
           // no-reclaim outcome proves the live check worked rather than a
           // parse refusal.
           if (v.useRawSql !== undefined) {
-            await db.execute(`INSERT OR REPLACE INTO profile_learning_lock
+            await db.run(`INSERT OR REPLACE INTO profile_learning_lock
                     (name, owner_token, pid, boot_id, starttime, acquired_at)
                   VALUES ('profile-learning', 'planted-${v.name}', ${process.pid}, ${v.useRawSql}, '${ownStarttime}', ${Date.now()})`);
           } else {
-            await db.execute({
-              sql: `INSERT OR REPLACE INTO profile_learning_lock
+            await db.run(
+              `INSERT OR REPLACE INTO profile_learning_lock
                     (name, owner_token, pid, boot_id, starttime, acquired_at)
                   VALUES ('profile-learning', 'planted-${v.name}', ?, ?, ?, ?)`,
-              args: [process.pid, v.bootId, ownStarttime, Date.now()],
-            });
+              [process.pid, v.bootId as string | number | null, ownStarttime, Date.now()]
+            );
           }
         } finally {
-          db.close();
+          await db.close();
         }
         const release = await lock.tryAcquireProfileLearningLock("/project-boot");
         results[v.name] = release !== null;
@@ -524,7 +489,7 @@ try {
       for (const c of cases) {
         const db = await openDb();
         try {
-          await db.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+          await db.run(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
             name TEXT PRIMARY KEY,
             owner_token TEXT NOT NULL,
             pid INTEGER NOT NULL,
@@ -532,14 +497,14 @@ try {
             starttime TEXT,
             acquired_at INTEGER NOT NULL
           )`);
-          await db.execute({
-            sql: `INSERT OR REPLACE INTO profile_learning_lock
+          await db.run(
+            `INSERT OR REPLACE INTO profile_learning_lock
                     (name, owner_token, pid, boot_id, starttime, acquired_at)
                   VALUES ('profile-learning', ?, ?, NULL, ?, ?)`,
-            args: [`planted-${c.name}`, c.pid, c.starttime, Date.now()],
-          });
+            [`planted-${c.name}`, c.pid, c.starttime, Date.now()]
+          );
         } finally {
-          db.close();
+          await db.close();
         }
         const release = await lock.tryAcquireProfileLearningLock("/project-starttime");
         results[c.name] = release !== null;
@@ -601,7 +566,7 @@ try {
         const storedValid = "darwin:Sun Nov 16 10:11:12 2025";
         const db = await openDb();
         try {
-          await db.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+          await db.run(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
             name TEXT PRIMARY KEY,
             owner_token TEXT NOT NULL,
             pid INTEGER NOT NULL,
@@ -609,14 +574,14 @@ try {
             starttime TEXT,
             acquired_at INTEGER NOT NULL
           )`);
-          await db.execute({
-            sql: `INSERT OR REPLACE INTO profile_learning_lock
+          await db.run(
+            `INSERT OR REPLACE INTO profile_learning_lock
                     (name, owner_token, pid, boot_id, starttime, acquired_at)
                   VALUES ('profile-learning', ?, ?, NULL, ?, ?)`,
-            args: ["planted-live-ps-garbage", foreignPid, storedValid, Date.now()],
-          });
+            ["planted-live-ps-garbage", foreignPid, storedValid, Date.now()]
+          );
         } finally {
-          db.close();
+          await db.close();
         }
         const release = await lock.tryAcquireProfileLearningLock("/project-darwin-live-garbage");
         const token = await readOwnerToken();
@@ -665,7 +630,7 @@ try {
       for (const c of cases) {
         const db = await openDb();
         try {
-          await db.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+          await db.run(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
             name TEXT PRIMARY KEY,
             owner_token TEXT NOT NULL,
             pid INTEGER NOT NULL,
@@ -675,7 +640,7 @@ try {
           )`);
           await dbExecutePlant(db, c.name, c.starttime);
         } finally {
-          db.close();
+          await db.close();
         }
         const release = await lock.tryAcquireProfileLearningLock("/project-darwin-sim");
         results[c.name] = release !== null;
@@ -694,7 +659,7 @@ try {
       // signal, and an untrusted local boot id must never fire it.
       const db = await openDb();
       try {
-        await db.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+        await db.run(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
           name TEXT PRIMARY KEY,
           owner_token TEXT NOT NULL,
           pid INTEGER NOT NULL,
@@ -702,14 +667,14 @@ try {
           starttime TEXT,
           acquired_at INTEGER NOT NULL
         )`);
-        await db.execute({
-          sql: `INSERT OR REPLACE INTO profile_learning_lock
+        await db.run(
+          `INSERT OR REPLACE INTO profile_learning_lock
                   (name, owner_token, pid, boot_id, starttime, acquired_at)
                 VALUES ('profile-learning', 'planted-other-boot', ?, '11111111-2222-3333-4444-555555555555', NULL, ?)`,
-          args: [process.pid, Date.now()],
-        });
+          [process.pid, Date.now()]
+        );
       } finally {
-        db.close();
+        await db.close();
       }
       const release = await lock.tryAcquireProfileLearningLock("/project-boot");
       out({ acquired: release !== null });
@@ -728,12 +693,12 @@ try {
       // supervisor respawning us). The old release must not drop that row.
       const db = await openDb();
       try {
-        await db.execute({
-          sql: `UPDATE profile_learning_lock SET owner_token = 'simulated-new-owner-token'
-                WHERE name = 'profile-learning'`,
-        });
+        await db.run(
+          `UPDATE profile_learning_lock SET owner_token = 'simulated-new-owner-token'
+                WHERE name = 'profile-learning'`
+        );
       } finally {
-        db.close();
+        await db.close();
       }
       await release();
       const stillHeld = await lock.isProfileLearningLockHeld();

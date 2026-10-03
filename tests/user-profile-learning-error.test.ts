@@ -52,7 +52,7 @@ mock.module(${JSON.stringify(configUrl)}, () => ({
     showUserProfileToasts: false,
     // The learning service now takes the cross-process lock before analysis.
     // Without a storagePath the lock would coordinate through the process cwd
-    // (old FS lock) or fail to place its coordination DB (new @libsql lock).
+    // (old FS lock) or fail to place its coordination DB (Turso lock).
     // A temp dir keeps this scenario hermetic; the error assertions below are
     // unchanged.
     storagePath: ${JSON.stringify(dir)},

@@ -2,16 +2,19 @@ import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
-import { createClient, type Client } from "@libsql/client";
+import { connect } from "@tursodatabase/database";
 import { CONFIG } from "../../config.js";
 import { log } from "../logger.js";
+import { tursoExperimentalFeatures } from "../turso/connection-manager.js";
+import { TursoDb } from "../turso/turso-db.js";
 
 /**
- * Standalone coordination database (SQLite via @libsql/client) inside
+ * Standalone coordination database (`@tursodatabase/database`) inside
  * CONFIG.storagePath. It is deliberately separate from the memory database:
  * every statement here is short and autonomous, and no transaction is ever
  * held across the LLM round trip, so lock traffic cannot block normal memory
- * database work.
+ * database work. Left unencrypted even when memory shards use encryption —
+ * it only stores ephemeral lock rows.
  */
 export const PROFILE_LEARNING_COORDINATION_DB = ".profile-learning-coordination.db";
 
@@ -60,17 +63,22 @@ function coordinationDbPath(): string {
  * callback, and always closes the handle. One handle per operation; nothing is
  * cached across the LLM round trip.
  */
-async function withCoordinationDb<T>(fn: (client: Client) => Promise<T>): Promise<T> {
+async function withCoordinationDb<T>(fn: (db: TursoDb) => Promise<T>): Promise<T> {
   const dbPath = coordinationDbPath();
   try {
     mkdirSync(dirname(dbPath), { recursive: true });
   } catch {
     // Already exists, or the statements below will fail loudly on their own.
   }
-  const client = createClient({ url: `file:${dbPath}` });
+  // No at-rest encryption: lock rows are ephemeral and must stay openable even
+  // when memory-shard encryption is enabled or the key rotates.
+  const native = await connect(dbPath, {
+    experimental: tursoExperimentalFeatures(),
+  });
+  const db = new TursoDb(native);
   try {
-    await client.execute(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
-    await client.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+    await db.run(`PRAGMA busy_timeout = ${BUSY_TIMEOUT_MS}`);
+    await db.run(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
       name TEXT PRIMARY KEY,
       owner_token TEXT NOT NULL,
       pid INTEGER NOT NULL,
@@ -78,14 +86,36 @@ async function withCoordinationDb<T>(fn: (client: Client) => Promise<T>): Promis
       starttime TEXT,
       acquired_at INTEGER NOT NULL
     )`);
-    return await fn(client);
+    return await fn(db);
   } finally {
-    client.close();
+    await db.close();
   }
 }
 
-function rowsAffected(result: { rowsAffected?: number | bigint }): number {
-  return Number(result.rowsAffected ?? 0);
+const LOCK_OPEN_ERROR_RE =
+  /File is locked by another process|already open|Locking error|busy|SQLITE_BUSY/i;
+
+function isCoordinationLockError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return LOCK_OPEN_ERROR_RE.test(message);
+}
+
+/** Retry briefly when another process still owns the coordination file. */
+async function withCoordinationDbRetry<T>(fn: (db: TursoDb) => Promise<T>): Promise<T> {
+  const attempts = 8;
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await withCoordinationDb(fn);
+    } catch (error) {
+      lastError = error;
+      if (attempt === attempts - 1 || !isCoordinationLockError(error)) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 15 + attempt * 25));
+    }
+  }
+  throw lastError;
 }
 
 /**
@@ -483,11 +513,11 @@ function releaseFn(ownerToken: string): () => Promise<void> {
     if (released) return;
     released = true;
     try {
-      await withCoordinationDb(async (client) => {
-        await client.execute({
-          sql: `DELETE FROM profile_learning_lock WHERE name = ? AND owner_token = ?`,
-          args: [LOCK_NAME, ownerToken],
-        });
+      await withCoordinationDbRetry(async (db) => {
+        await db.run(`DELETE FROM profile_learning_lock WHERE name = ? AND owner_token = ?`, [
+          LOCK_NAME,
+          ownerToken,
+        ]);
       });
     } catch (error) {
       // The owner row survives; after this process exits another process can
@@ -497,6 +527,40 @@ function releaseFn(ownerToken: string): () => Promise<void> {
       });
     }
   };
+}
+
+/**
+ * Test-only interleaving hooks for the CAS race fixture. Enabled only when
+ * PLL_CAS_HOOKS=1 so production acquires never pay for this path.
+ */
+async function casTestHooks(
+  phase: "select" | "update",
+  row?: Record<string, unknown> | null
+): Promise<void> {
+  if (process.env.PLL_CAS_HOOKS !== "1") return;
+  const storage = process.env.PLL_STORAGE;
+  const label = process.env.PLL_LABEL ?? "x";
+  if (!storage) return;
+
+  const { existsSync, writeFileSync } = await import("node:fs");
+  const { join } = await import("node:path");
+  const barrier = (name: string) => join(storage, `hs.${name}`);
+  const waitFile = async (path: string) => {
+    const deadline = Date.now() + 30_000;
+    while (!existsSync(path)) {
+      if (Date.now() > deadline) throw new Error(`barrier timeout: ${path}`);
+      await new Promise((r) => setTimeout(r, 5));
+    }
+  };
+
+  if (phase === "select") {
+    const token = row ? String(row["owner_token"] ?? "none") : "none";
+    writeFileSync(barrier(`token.${label}`), token);
+    return;
+  }
+
+  writeFileSync(barrier(`seen.${label}`), "ready");
+  await waitFile(barrier("go.update"));
 }
 
 /**
@@ -527,36 +591,35 @@ export async function tryAcquireProfileLearningLock(
   const ownerToken = randomUUID();
 
   try {
-    return await withCoordinationDb(async (client) => {
-      const inserted = await client.execute({
-        sql: `INSERT INTO profile_learning_lock
+    type AcquireDecision =
+      | { kind: "acquired" }
+      | { kind: "skip" }
+      | { kind: "cas"; oldToken: string; previousPid: number };
+
+    const decision = await withCoordinationDbRetry(async (db): Promise<AcquireDecision> => {
+      const inserted = await db.run(
+        `INSERT INTO profile_learning_lock
                 (name, owner_token, pid, boot_id, starttime, acquired_at)
               VALUES (?, ?, ?, ?, ?, ?)
               ON CONFLICT (name) DO NOTHING`,
-        args: [
-          LOCK_NAME,
-          ownerToken,
-          identity.pid,
-          identity.bootId,
-          identity.starttime,
-          Date.now(),
-        ],
-      });
-      if (rowsAffected(inserted) === 1) {
-        return releaseFn(ownerToken);
+        [LOCK_NAME, ownerToken, identity.pid, identity.bootId, identity.starttime, Date.now()]
+      );
+      if (inserted === 1) {
+        return { kind: "acquired" };
       }
 
-      const selected = await client.execute({
-        sql: `SELECT owner_token, pid, boot_id, starttime, acquired_at
+      const row = await db.get(
+        `SELECT owner_token, pid, boot_id, starttime, acquired_at
               FROM profile_learning_lock WHERE name = ?`,
-        args: [LOCK_NAME],
-      });
-      const row = selected.rows[0] as Record<string, unknown> | undefined;
+        [LOCK_NAME]
+      );
       if (!row) {
         // Released between our failed INSERT and the SELECT. Treat as
         // contention: skip this round, the next idle event retries.
-        return null;
+        return { kind: "skip" };
       }
+
+      await casTestHooks("select", row);
 
       const parsed = parseOwnerRow(row);
       if (!parsed.ok) {
@@ -564,39 +627,58 @@ export async function tryAcquireProfileLearningLock(
           directory,
           reason: parsed.reason,
         });
-        return null;
+        return { kind: "skip" };
       }
 
       if (!ownerIsDefinitelyDead(parsed.owner, identity)) {
         // Live holder, EPERM, or uncertain identity: never reclaim, never
         // guess, and no TTL is allowed to override this.
-        return null;
+        return { kind: "skip" };
       }
 
-      const claimed = await client.execute({
-        sql: `UPDATE profile_learning_lock
+      return {
+        kind: "cas",
+        oldToken: parsed.owner.ownerToken,
+        previousPid: parsed.owner.pid,
+      };
+    });
+
+    if (decision.kind === "acquired") {
+      return releaseFn(ownerToken);
+    }
+    if (decision.kind === "skip") {
+      return null;
+    }
+
+    // Park outside the DB session so cas-race competitors (and Windows
+    // single-owner opens) are not blocked by a held coordination handle.
+    await casTestHooks("update");
+
+    const claimed = await withCoordinationDbRetry(async (db) =>
+      db.run(
+        `UPDATE profile_learning_lock
               SET owner_token = ?, pid = ?, boot_id = ?, starttime = ?, acquired_at = ?
               WHERE name = ? AND owner_token = ?`,
-        args: [
+        [
           ownerToken,
           identity.pid,
           identity.bootId,
           identity.starttime,
           Date.now(),
           LOCK_NAME,
-          parsed.owner.ownerToken,
-        ],
+          decision.oldToken,
+        ]
+      )
+    );
+    if (claimed === 1) {
+      log("profile-learning lock: reclaimed lock from dead owner", {
+        directory,
+        previousPid: decision.previousPid,
       });
-      if (rowsAffected(claimed) === 1) {
-        log("profile-learning lock: reclaimed lock from dead owner", {
-          directory,
-          previousPid: parsed.owner.pid,
-        });
-        return releaseFn(ownerToken);
-      }
-      // Lost the CAS race to another reclaimer.
-      return null;
-    });
+      return releaseFn(ownerToken);
+    }
+    // Lost the CAS race to another reclaimer.
+    return null;
   } catch (error) {
     log("profile-learning lock: coordination database unavailable, refusing to acquire", {
       directory,
@@ -612,12 +694,11 @@ export async function tryAcquireProfileLearningLock(
  */
 export async function isProfileLearningLockHeld(): Promise<boolean> {
   try {
-    return await withCoordinationDb(async (client) => {
-      const result = await client.execute({
-        sql: `SELECT 1 FROM profile_learning_lock WHERE name = ? LIMIT 1`,
-        args: [LOCK_NAME],
-      });
-      return result.rows.length > 0;
+    return await withCoordinationDbRetry(async (db) => {
+      const row = await db.get(`SELECT 1 AS ok FROM profile_learning_lock WHERE name = ? LIMIT 1`, [
+        LOCK_NAME,
+      ]);
+      return row != null;
     });
   } catch (error) {
     log("profile-learning lock: coordination database unavailable in isProfileLearningLockHeld", {

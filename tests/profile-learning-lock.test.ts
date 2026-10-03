@@ -1,13 +1,23 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createClient } from "@libsql/client";
+import { connect } from "@tursodatabase/database";
+import { TursoDb } from "../src/services/turso/turso-db.js";
 import {
   PROFILE_LEARNING_COORDINATION_DB,
   getProfileLearningBootId,
   getProfileLearningStarttime,
 } from "../src/services/user-profile/learning-lock.js";
+import { tursoExperimentalFeatures } from "../src/services/turso/connection-manager.js";
 
 const tempDirs: string[] = [];
 
@@ -66,7 +76,14 @@ function spawnWorker(
 ): WorkerProc {
   const proc = Bun.spawn({
     cmd: [process.execPath, WORKER],
-    env: { ...process.env, PLL_STORAGE: dir, PLL_MODE: mode, PLL_LABEL: label, ...extraEnv },
+    env: {
+      ...process.env,
+      PLL_STORAGE: dir,
+      PLL_MODE: mode,
+      PLL_LABEL: label,
+      ...(mode === "cas-race" ? { PLL_CAS_HOOKS: "1" } : {}),
+      ...extraEnv,
+    },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -99,16 +116,16 @@ async function runProbe(dir: string): Promise<WorkerResult> {
 }
 
 /** Opens the coordination DB directly (fixture setup / assertions). */
-async function withDb<T>(
-  dir: string,
-  fn: (db: ReturnType<typeof createClient>) => Promise<T>
-): Promise<T> {
-  const db = createClient({ url: `file:${join(dir, PROFILE_LEARNING_COORDINATION_DB)}` });
+async function withDb<T>(dir: string, fn: (db: TursoDb) => Promise<T>): Promise<T> {
+  const native = await connect(join(dir, PROFILE_LEARNING_COORDINATION_DB), {
+    experimental: tursoExperimentalFeatures(),
+  });
+  const db = new TursoDb(native);
   try {
-    await db.execute("PRAGMA busy_timeout = 5000");
+    await db.run("PRAGMA busy_timeout = 5000");
     return await fn(db);
   } finally {
-    db.close();
+    await db.close();
   }
 }
 
@@ -122,7 +139,7 @@ interface PlantedOwner {
 
 async function plantOwner(dir: string, owner: PlantedOwner): Promise<void> {
   await withDb(dir, async (db) => {
-    await db.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+    await db.run(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
       name TEXT PRIMARY KEY,
       owner_token TEXT NOT NULL,
       pid INTEGER NOT NULL,
@@ -130,18 +147,20 @@ async function plantOwner(dir: string, owner: PlantedOwner): Promise<void> {
       starttime TEXT,
       acquired_at INTEGER NOT NULL
     )`);
-    await db.execute({
-      sql: `INSERT OR REPLACE INTO profile_learning_lock
+    await db.run(
+      `INSERT OR REPLACE INTO profile_learning_lock
               (name, owner_token, pid, boot_id, starttime, acquired_at)
             VALUES ('profile-learning', ?, ?, ?, ?, ?)`,
-      args: [
+      [
         owner.ownerToken ?? "planted-owner-token",
         owner.pid,
         owner.bootId ?? null,
         owner.starttime ?? null,
         owner.acquiredAt ?? Date.now(),
-      ],
-    });
+      ]
+    );
+    // Flush WAL so freshly spawned workers always see the planted row.
+    await db.run(`PRAGMA wal_checkpoint(TRUNCATE)`);
   });
 }
 
@@ -188,10 +207,9 @@ function localKindDeadPidStarttime(): string {
 
 async function currentOwnerToken(dir: string): Promise<string | null> {
   return withDb(dir, async (db) => {
-    const result = await db.execute(
+    const row = await db.get(
       `SELECT owner_token FROM profile_learning_lock WHERE name = 'profile-learning'`
     );
-    const row = result.rows[0] as Record<string, unknown> | undefined;
     return row ? String(row["owner_token"]) : null;
   });
 }
@@ -278,10 +296,24 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
     writeFileSync(barrierPath(dir, "go"), "ready");
 
     // Both sides must have observed the SAME stale owner token before
-    // either CAS fires; the wrapped client parks each UPDATE until
-    // go.update, making the shared-snapshot precondition deterministic.
-    await waitBarrier(dir, "seen.a");
-    await waitBarrier(dir, "seen.b");
+    // either CAS fires; PLL_CAS_HOOKS parks each UPDATE until go.update,
+    // making the shared-snapshot precondition deterministic.
+    try {
+      await waitBarrier(dir, "seen.a");
+      await waitBarrier(dir, "seen.b");
+    } catch (error) {
+      const [ra, rb] = await Promise.all([a.result, b.result]);
+      throw new Error(
+        `${String(error)}\n` +
+          `a: exit=${ra.exitCode} out=${JSON.stringify(ra.parsed)} err=${ra.stderr}\n` +
+          `b: exit=${rb.exitCode} out=${JSON.stringify(rb.parsed)} err=${rb.stderr}\n` +
+          `barriers=${readdirSync(dir)
+            .filter((name) => name.startsWith("hs."))
+            .sort()
+            .join(",")}`,
+        { cause: error }
+      );
+    }
     const tokenA = readFileSync(barrierPath(dir, "token.a"), "utf-8");
     const tokenB = readFileSync(barrierPath(dir, "token.b"), "utf-8");
     expect(tokenA).toBe(tokenB);
