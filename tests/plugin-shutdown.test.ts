@@ -11,7 +11,11 @@ describe("plugin shutdown", () => {
   it("clears pending idle auto-capture work during cleanup", () => {
     const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf-8");
 
-    expect(source).toContain("clearTimeout(idleTimeout)");
-    expect(source).toContain("idleTimeout = null");
+    // Per-session debounce timers must all be cleared on cleanup, and the
+    // plugin lifetime signal must abort queued-but-unstarted capture jobs.
+    expect(source).toContain("idleTimers");
+    expect(source).toMatch(/for \(const timer of idleTimers\.values\(\)\) clearTimeout\(timer\)/);
+    expect(source).toContain("idleTimers.clear()");
+    expect(source).toContain("pluginLifetime.abort()");
   });
 });

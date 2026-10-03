@@ -303,7 +303,14 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
   startAutoUpdate(ctx, CONFIG.autoUpdate);
   const tags = getTags(directory);
   let webServer: WebServer | null = null;
-  let idleTimeout: ReturnType<typeof setTimeout> | null = null;
+  // One idle debounce timer per session: a new idle for the same session resets
+  // its own timer, but must never cancel another session's pending capture
+  // (starving a finished session's summary forever once no further idle
+  // events arrive).
+  const idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Aborted on plugin dispose: queued-but-not-started auto-capture jobs are
+  // skipped; in-flight work keeps its original (uncancellable) semantics.
+  const pluginLifetime = new AbortController();
 
   const GLOBAL_PLUGIN_WARMUP_KEY = Symbol.for("opencode-mem.plugin.warmedup");
 
@@ -468,10 +475,9 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
   const cleanupPlugin = async () => {
     if (cleanedUp) return;
     cleanedUp = true;
-    if (idleTimeout) {
-      clearTimeout(idleTimeout);
-      idleTimeout = null;
-    }
+    pluginLifetime.abort();
+    for (const timer of idleTimers.values()) clearTimeout(timer);
+    idleTimers.clear();
     if (webServer) await webServer.stop();
     if (memoryClient) await memoryClient.close();
   };
@@ -1095,6 +1101,7 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
 
       if (event.type === "session.idle") {
         if (!isConfigured() || !CONFIG.autoCaptureEnabled) return;
+        if (cleanedUp) return;
         const sessionID = event.properties?.sessionID;
         if (!sessionID) return;
 
@@ -1105,11 +1112,21 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
           return;
         }
 
-        if (idleTimeout) clearTimeout(idleTimeout);
+        // The internal-capture check above awaits: dispose may have run while it
+        // was in flight. Never arm post-dispose timers.
+        if (cleanedUp) return;
 
-        idleTimeout = setTimeout(async () => {
+        // Same-session idles debounce into one capture; different sessions
+        // each keep their own pending timer (see idleTimers comment above).
+        const existingTimer = idleTimers.get(sessionID);
+        if (existingTimer) clearTimeout(existingTimer);
+
+        const timer = setTimeout(async () => {
           try {
-            await performAutoCapture(ctx, sessionID, directory);
+            idleTimers.delete(sessionID);
+            await performAutoCapture(ctx, sessionID, directory, {
+              signal: pluginLifetime.signal,
+            });
 
             // Prompts are shared across projects, but web-server ownership tracks
             // whoever bound the port first and is never handed over while that
@@ -1117,6 +1134,7 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
             // whenever the owner stops seeing sessions, and disables learning
             // outright when the web server is off. Any active instance may learn;
             // performUserProfileLearning holds a cross-process lock internally.
+            if (cleanedUp) return;
             await performUserProfileLearning(ctx, directory);
 
             // Retention cleanup stays owner-only: it is storage-wide maintenance
@@ -1128,9 +1146,12 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
           } catch (error) {
             log("Idle processing error", { error: String(error) });
           } finally {
-            idleTimeout = null;
+            // Only drop the entry if it is still ours: a newer idle for this
+            // session may have re-armed a fresh timer while we ran.
+            if (idleTimers.get(sessionID) === timer) idleTimers.delete(sessionID);
           }
         }, 10000);
+        idleTimers.set(sessionID, timer);
       }
 
       if (event.type === "session.compacted") {
