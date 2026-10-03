@@ -117,7 +117,6 @@ if (mode === "current-boot-invalid") {
       return realSpawnSync(command, args, options);
     },
   }));
-  }));
 }
 // cas-race interleaving is driven by PLL_CAS_HOOKS=1 inside learning-lock
 // (select writes token.<label>, update parks on go.update) — no client mock.
