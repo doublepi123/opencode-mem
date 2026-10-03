@@ -12,6 +12,18 @@ function createContext(overrides: Record<string, unknown> = {}) {
       directory: "/workspace/project",
       project: { id: "project", directory: "/workspace/project", canonical: "project" },
     },
+    // Native v2 context contract: ctx.provider.list() -> { location, data }
+    // with ProviderInfo rows (id + activation). The legacy bridge derives
+    // connectivity from this directory, not from model.list.
+    provider: {
+      list: async () => ({
+        location: { directory: "/workspace/project" },
+        data: [
+          { id: "anthropic", name: "Anthropic", activation: "enabled", package: "anthropic" },
+          { id: "openai", name: "OpenAI", activation: "enabled", package: "openai" },
+        ],
+      }),
+    },
     model: {
       list: async () => ({
         data: [
@@ -36,8 +48,18 @@ function createContext(overrides: Record<string, unknown> = {}) {
 }
 
 describe("OpenCode v2 legacy client bridge", () => {
-  it("reports providers that have active models", async () => {
-    const client = createLegacyClient(createContext());
+  it("reports providers with active models from the provider directory", async () => {
+    // Connectivity comes from ctx.provider.list() (activation auto/enabled);
+    // model.list is no longer the source (broker 'opencode' hid real ids).
+    // model.list throws here if ever consulted.
+    const ctx = createContext({
+      model: {
+        list: async () => {
+          throw new Error("model.list must not be called");
+        },
+      },
+    });
+    const client = createLegacyClient(ctx);
     const result = await client.provider.list();
     expect(result.data.connected).toEqual(["anthropic", "openai"]);
   });
