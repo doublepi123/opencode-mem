@@ -88,9 +88,21 @@ describe("AI provider config", () => {
       apiUrl: "https://api.openai.com/v1",
       apiKey: "sk-test",
       memoryTemperature: false,
+      forceToolChoice: undefined,
       maxIterations: 7,
       iterationTimeout: 1234,
     });
+  });
+
+  it("builds provider config with forceToolChoice from runtime config", () => {
+    const providerConfig = buildMemoryProviderConfig({
+      memoryModel: "deepseek-v4-flash",
+      memoryApiUrl: "https://openrouter.ai/api/v1",
+      memoryApiKey: "sk-test",
+      forceToolChoice: false,
+    });
+
+    expect(providerConfig.forceToolChoice).toBe(false);
   });
 
   it("rejects placeholder API keys before a provider request is built", () => {
@@ -138,6 +150,7 @@ describe("AI provider config", () => {
       model: "",
       apiUrl: "",
       apiKey: "sk-orca-test",
+      forceToolChoice: undefined,
       maxIterations: undefined,
       iterationTimeout: undefined,
     });
@@ -147,6 +160,30 @@ describe("AI provider config", () => {
     expect(() =>
       buildMemoryProviderConfig({
         memoryProvider: "orcarouter",
+      })
+    ).toThrow("missing memoryApiKey");
+  });
+
+  it("builds atlas-cloud config from only an API key, defaulting model and endpoint", () => {
+    const providerConfig = buildMemoryProviderConfig({
+      memoryProvider: "atlas-cloud",
+      memoryApiKey: "atlas-test-key",
+    });
+
+    expect(providerConfig).toEqual({
+      model: "",
+      apiUrl: "",
+      apiKey: "atlas-test-key",
+      forceToolChoice: undefined,
+      maxIterations: undefined,
+      iterationTimeout: undefined,
+    });
+  });
+
+  it("still requires an API key for the atlas-cloud provider", () => {
+    expect(() =>
+      buildMemoryProviderConfig({
+        memoryProvider: "atlas-cloud",
       })
     ).toThrow("missing memoryApiKey");
   });

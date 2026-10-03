@@ -2,8 +2,7 @@ import { tursoConnectionManager } from "./connection-manager.js";
 import { log } from "../logger.js";
 import type { MemoryRecord, SearchResult, ShardInfo } from "./types.js";
 import { distanceToSimilarity, vectorToJson } from "./vector-utils.js";
-import type { TursoDb } from "./turso-db.js";
-import type { Transaction } from "@libsql/client";
+import type { TursoDb, TursoTx } from "./turso-db.js";
 
 function parseMetadata(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== "string") return undefined;
@@ -15,7 +14,7 @@ function parseMetadata(value: unknown): Record<string, unknown> | undefined {
 }
 
 export class TursoVectorSearch {
-  async insertVectorInTransaction(tx: Transaction, record: MemoryRecord): Promise<void> {
+  async insertVectorInTransaction(tx: TursoTx, record: MemoryRecord): Promise<void> {
     const contentVector = vectorToJson(record.vector);
     const commonArgs = [
       record.containerTag,
@@ -186,7 +185,11 @@ export class TursoVectorSearch {
           ? 0
           : distanceToSimilarity(Number(row.tags_dist));
       const memoryTagsStr = String(row.tags || "");
-      const memoryTags = memoryTagsStr.split(",").map((tag) => tag.trim().toLowerCase());
+      // filter(Boolean): "".split(",") → [""], and "query".includes("") is always true.
+      const memoryTags = memoryTagsStr
+        .split(",")
+        .map((tag) => tag.trim().toLowerCase())
+        .filter(Boolean);
 
       let exactMatchBoost = 0;
       if (queryWords.length > 0 && memoryTags.length > 0) {
@@ -226,38 +229,12 @@ export class TursoVectorSearch {
     queryJson: string,
     k: number,
     containerTag: string,
-    indexName: string,
+    _indexName: string,
     columnName: string
   ): Promise<Array<{ id: string; similarity: number }>> {
-    try {
-      const rows = await db.all(
-        containerTag === ""
-          ? `
-          SELECT m.id AS id, vector_distance_cos(m.${columnName}, vector32(?)) AS dist
-          FROM vector_top_k('${indexName}', vector32(?), ?) AS v
-          CROSS JOIN memories m ON m.rowid = v.id
-          WHERE m.${columnName} IS NOT NULL
-        `
-          : `
-          SELECT m.id AS id, vector_distance_cos(m.${columnName}, vector32(?)) AS dist
-          FROM vector_top_k('${indexName}', vector32(?), ?) AS v
-          CROSS JOIN memories m ON m.rowid = v.id
-          WHERE m.${columnName} IS NOT NULL AND m.container_tag = ?
-        `,
-        containerTag === "" ? [queryJson, queryJson, k] : [queryJson, queryJson, k, containerTag]
-      );
-
-      return rows.map((row) => ({
-        id: String(row.id),
-        similarity: distanceToSimilarity(Number(row.dist)),
-      }));
-    } catch (error) {
-      log("Turso vector_top_k failed; falling back to exact scan", {
-        indexName,
-        error: String(error),
-      });
-      return this.exactScanKind(db, queryJson, k, containerTag, columnName);
-    }
+    // @tursodatabase/database supports F32_BLOB + vector_distance_cos but not
+    // libSQL DiskANN (libsql_vector_idx / vector_top_k). Use exact cosine scan.
+    return this.exactScanKind(db, queryJson, k, containerTag, columnName);
   }
 
   private async exactScanKind(
@@ -380,7 +357,7 @@ export class TursoVectorSearch {
       ? db.all(
           `
       SELECT * FROM memories
-      ORDER BY created_at DESC
+      ORDER BY is_pinned DESC, created_at DESC
       LIMIT ?
     `,
           [limit]
@@ -389,7 +366,7 @@ export class TursoVectorSearch {
           `
       SELECT * FROM memories
       WHERE container_tag = ?
-      ORDER BY created_at DESC
+      ORDER BY is_pinned DESC, created_at DESC
       LIMIT ?
     `,
           [containerTag, limit]

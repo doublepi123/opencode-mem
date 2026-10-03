@@ -1,0 +1,62 @@
+{
+  "success": true,
+  "data": {
+    "exists": true,
+    "id": "profile_sample",
+    "userId": "user_sample",
+    "displayName": "Sample User",
+    "userName": "sample",
+    "userEmail": "sample@example.com",
+    "version": 4,
+    "totalPromptsAnalyzed": 128,
+    "lastAnalyzedAt": "2026-10-01T20:15:00.000Z",
+    "createdAt": "2026-08-01T10:00:00.000Z",
+    "profileData": {
+      "preferences": [
+        {
+          "category": "code-style",
+          "description": "Prefers concise TypeScript, small modules, and shared schema types.",
+          "confidence": 0.92,
+          "frequency": 34,
+          "evidence": ["Keep types next to the API", "Prefer small focused files"]
+        },
+        {
+          "category": "ui",
+          "description": "Wants consistent toolbar controls, muted accents, and custom toasts.",
+          "confidence": 0.88,
+          "frequency": 21,
+          "evidence": ["Match existing search bar height", "Use stacked toasts"]
+        }
+      ],
+      "patterns": [
+        {
+          "category": "workflow",
+          "description": "Iterates UI polish against a reference design, then ports tokens and components.",
+          "confidence": 0.8,
+          "frequency": 12,
+          "evidence": ["Reuse the filter popover pattern"]
+        },
+        {
+          "category": "testing",
+          "description": "Uses fixture data for frontend verification without a live database.",
+          "confidence": 0.75,
+          "frequency": 6
+        }
+      ],
+      "workflows": [
+        {
+          "category": "release-ui",
+          "description": "Brand update workflow for web assets",
+          "confidence": 0.7,
+          "frequency": 3,
+          "steps": [
+            "Update shared color tokens",
+            "Regenerate favicon assets",
+            "Refresh banner and swatches",
+            "Smoke-test the main explorer views"
+          ]
+        }
+      ]
+    }
+  }
+}

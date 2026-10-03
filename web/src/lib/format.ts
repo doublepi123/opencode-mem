@@ -12,3 +12,7 @@ export function formatDate(isoString: string): string {
     minute: "2-digit",
   });
 }
+
+export function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.substring(0, max)}...` : text;
+}

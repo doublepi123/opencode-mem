@@ -1,5 +1,3 @@
-import { useSyncExternalStore } from "react";
-
 export type Theme = "dark" | "light";
 
 const STORAGE_KEY = "opencode-mem-theme";
@@ -21,25 +19,25 @@ function emit() {
 function applyTheme(theme: Theme) {
   currentTheme = theme;
   if (typeof document !== "undefined") {
-    document.documentElement.classList.toggle("dark", theme === "dark");
+    const root = document.documentElement;
+    // Disable staggered CSS transitions so light↔dark flips in one paint.
+    root.classList.add("theme-switching");
+    root.classList.toggle("dark", theme === "dark");
     localStorage.setItem(STORAGE_KEY, theme);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        root.classList.remove("theme-switching");
+      });
+    });
   }
   emit();
 }
 
-function subscribe(listener: () => void) {
+export function subscribeTheme(listener: () => void) {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
-}
-
-function getSnapshot() {
-  return currentTheme;
-}
-
-function getServerSnapshot(): Theme {
-  return "dark";
 }
 
 export function getTheme(): Theme {
@@ -60,11 +58,6 @@ export function initTheme(): void {
   applyTheme(readTheme());
 }
 
-export function useTheme(): Theme {
-  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-}
-
-// Apply on module load so first paint matches stored preference.
 if (typeof document !== "undefined") {
   applyTheme(currentTheme);
 }

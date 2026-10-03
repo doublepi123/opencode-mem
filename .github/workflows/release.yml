@@ -7,7 +7,10 @@ on:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    # Canonical publish only — fork tag pushes lack NPM_TOKEN and must not fail noisily.
+    if: github.repository == 'tickernelz/opencode-mem'
+    # Prefer the new GA image; smoke/embedding still cover 24.04 + 26.04.
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
     steps:

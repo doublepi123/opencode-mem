@@ -16,7 +16,8 @@ permissions:
 jobs:
   check:
     name: check
-    runs-on: ubuntu-latest
+    # Prefer the new GA image; matrix jobs still cover 24.04 + 26.04.
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
 

@@ -3,7 +3,11 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClient } from "@libsql/client";
-import { PROFILE_LEARNING_COORDINATION_DB } from "../src/services/user-profile/learning-lock.js";
+import {
+  PROFILE_LEARNING_COORDINATION_DB,
+  getProfileLearningBootId,
+  getProfileLearningStarttime,
+} from "../src/services/user-profile/learning-lock.js";
 
 const tempDirs: string[] = [];
 
@@ -18,8 +22,10 @@ afterAll(() => {
 });
 
 const WORKER = join(import.meta.dir, "fixtures", "profile-learning-lock-worker.mts");
-const HAS_PROC = existsSync("/proc/self/stat");
-const HAS_BOOT_ID = existsSync("/proc/sys/kernel/random/boot_id");
+const LOCAL_BOOT_ID = getProfileLearningBootId();
+const LOCAL_START_TIME = getProfileLearningStarttime(process.pid);
+const HAS_BOOT_IDENTITY = LOCAL_BOOT_ID !== null;
+const HAS_START_IDENTITY = LOCAL_START_TIME !== null;
 
 function storage(): string {
   const dir = mkdtempSync(join(tmpdir(), "opencode-mem-learning-lock-"));
@@ -135,14 +141,18 @@ async function plantOwner(dir: string, owner: PlantedOwner): Promise<void> {
 }
 
 function readBootId(): string {
-  return readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
+  if (!LOCAL_BOOT_ID) {
+    throw new Error("no local boot identity on this platform");
+  }
+  return LOCAL_BOOT_ID;
 }
 
-/** Field 22 of /proc/<pid>/stat (comm may contain spaces/parens). */
 function readStarttime(pid: number): string {
-  const stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
-  const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
-  return String(fields[22 - 3]);
+  const starttime = getProfileLearningStarttime(pid);
+  if (!starttime) {
+    throw new Error(`no starttime identity for pid ${pid} on this platform`);
+  }
+  return starttime;
 }
 
 async function currentOwnerToken(dir: string): Promise<string | null> {
@@ -194,8 +204,8 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
     // the lock is live under any reading. The age must play no role.
     await plantOwner(dir, {
       pid: process.pid,
-      bootId: HAS_BOOT_ID ? readBootId() : null,
-      starttime: HAS_PROC ? readStarttime(process.pid) : null,
+      bootId: HAS_BOOT_IDENTITY ? readBootId() : null,
+      starttime: HAS_START_IDENTITY ? readStarttime(process.pid) : null,
       acquiredAt: Date.now() - 31 * 60 * 1000,
     });
 
@@ -206,19 +216,24 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
     expect(await currentOwnerToken(dir)).toBe("planted-owner-token");
   }, 30_000);
 
-  it("never steals a lock owned by a process we cannot signal (EPERM)", async () => {
-    const dir = storage();
-    // PID 1 is alive and owned by root; kill(1, 0) yields EPERM for a
-    // non-root caller. No startup identity is recorded, so the
-    // implementation must fall back to the signal probe and treat EPERM
-    // as "alive, not reclaimable".
-    await plantOwner(dir, { pid: 1, starttime: null, acquiredAt: Date.now() });
+  it.skipIf(process.platform === "win32")(
+    "never steals a lock owned by a process we cannot signal (EPERM)",
+    async () => {
+      const dir = storage();
+      // PID 1 is alive and owned by root; kill(1, 0) yields EPERM for a
+      // non-root caller. No startup identity is recorded, so the
+      // implementation must fall back to the signal probe and treat EPERM
+      // as "alive, not reclaimable". Windows has no equivalent protected
+      // PID 1 semantics (PID 1 is typically ESRCH), so this probe is Unix-only.
+      await plantOwner(dir, { pid: 1, starttime: null, acquiredAt: Date.now() });
 
-    const result = await runProbe(dir);
-    expect(result.exitCode).toBe(0);
-    expect(result.parsed).toEqual({ acquired: false });
-    expect(await currentOwnerToken(dir)).toBe("planted-owner-token");
-  }, 30_000);
+      const result = await runProbe(dir);
+      expect(result.exitCode).toBe(0);
+      expect(result.parsed).toEqual({ acquired: false });
+      expect(await currentOwnerToken(dir)).toBe("planted-owner-token");
+    },
+    30_000
+  );
 
   it("exactly one of two competitors CAS-reclaims the same dead owner", async () => {
     const dir = storage();
@@ -279,13 +294,16 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
   }, 45_000);
 
   it("reclaims a live PID only when the startup identity differs (PID reuse)", async () => {
+    // Requires a platform starttime identity (Linux /proc or Darwin ps).
+    if (!HAS_START_IDENTITY) return;
+
     const dir = storage();
     // This test process is alive, but the recorded starttime belongs to a
     // previous inhabitant of this PID — reuse must be detected by identity,
     // not by age (acquired_at is fresh).
     await plantOwner(dir, {
       pid: process.pid,
-      bootId: HAS_BOOT_ID ? readBootId() : null,
+      bootId: HAS_BOOT_IDENTITY ? readBootId() : null,
       starttime: "1",
       acquiredAt: Date.now(),
     });
@@ -297,11 +315,14 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
   }, 30_000);
 
   it("reclaims an owner from a previous boot even though its PID is alive now", async () => {
+    // Requires a platform boot identity (Linux boot_id or Darwin kern.boottime).
+    if (!HAS_BOOT_IDENTITY) return;
+
     const dir = storage();
     await plantOwner(dir, {
       pid: process.pid,
       bootId: "00000000-0000-0000-0000-000000000000",
-      starttime: HAS_PROC ? readStarttime(process.pid) : null,
+      starttime: HAS_START_IDENTITY ? readStarttime(process.pid) : null,
       acquiredAt: Date.now(),
     });
 
@@ -349,6 +370,9 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
   }, 60_000);
 
   it("boot_id variants: malformed fails closed; valid-null and same-as-host stay live", async () => {
+    // Worker reads the local boot/starttime identity; skip where unavailable.
+    if (!HAS_BOOT_IDENTITY || !HAS_START_IDENTITY) return;
+
     const dir = storage();
     const result = await spawnWorker(dir, "boot-variants").result;
     expect(result.exitCode).toBe(0);
@@ -362,6 +386,9 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
   }, 60_000);
 
   it("an untrusted local boot_id never acts as a dead signal", async () => {
+    // Worker forces the local boot identity reader to return garbage.
+    if (!HAS_BOOT_IDENTITY) return;
+
     const dir = storage();
     const result = await spawnWorker(dir, "current-boot-invalid").result;
     expect(result.exitCode).toBe(0);

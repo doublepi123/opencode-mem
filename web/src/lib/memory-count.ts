@@ -1,7 +1,8 @@
 export function getDisplayedMemoryCount(
   isSearching: boolean,
   searchTotal: number,
-  storeTotal: number
+  storeTotal: number,
+  tagFilterActive = false
 ): number {
-  return isSearching ? searchTotal : storeTotal;
+  return isSearching || tagFilterActive ? searchTotal : storeTotal;
 }

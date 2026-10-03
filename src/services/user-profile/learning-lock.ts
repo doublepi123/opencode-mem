@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
@@ -37,7 +38,16 @@ type ProcStatResult =
   { status: "ok"; starttime: string } | { status: "absent" } | { status: "unreadable" };
 
 /** Linux boot_id is a lowercase UUID printed by the kernel. */
-const BOOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const LINUX_BOOT_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Darwin boot identity derived from kern.boottime seconds. */
+const DARWIN_BOOT_ID_PATTERN = /^darwin-boot-\d+$/;
+
+function isKnownBootId(value: string): boolean {
+  return LINUX_BOOT_ID_PATTERN.test(value) || DARWIN_BOOT_ID_PATTERN.test(value);
+}
+
+/** Cached for the process lifetime — boot identity cannot change without a reboot. */
+let cachedBootId: string | null | undefined;
 
 function coordinationDbPath(): string {
   return resolve(CONFIG.storagePath || "", PROFILE_LEARNING_COORDINATION_DB);
@@ -78,25 +88,56 @@ function rowsAffected(result: { rowsAffected?: number | bigint }): number {
 
 /**
  * Reads the machine's current boot id. The value is only used as a dead
- * signal when it matches the strict kernel format; anything unreadable or
+ * signal when it matches a known platform format; anything unreadable or
  * malformed is treated as "unknown" and never participates in a dead
  * decision.
+ *
+ * - Linux: `/proc/sys/kernel/random/boot_id` (UUID)
+ * - Darwin: `sysctl kern.boottime` seconds, encoded as `darwin-boot-<sec>`
  */
-function readBootId(): string | null {
+function readBootIdUncached(): string | null {
   try {
     const value = readFileSync("/proc/sys/kernel/random/boot_id", "utf-8").trim();
-    return BOOT_ID_PATTERN.test(value) ? value : null;
+    if (LINUX_BOOT_ID_PATTERN.test(value)) return value;
   } catch {
-    return null;
+    // Fall through to Darwin / unknown.
   }
+
+  if (process.platform === "darwin") {
+    try {
+      const result = spawnSync("sysctl", ["-n", "kern.boottime"], {
+        encoding: "utf8",
+        timeout: 2_000,
+      });
+      if (result.status === 0 && typeof result.stdout === "string") {
+        const match = result.stdout.match(/sec\s*=\s*(\d+)/);
+        if (match) {
+          const bootId = `darwin-boot-${match[1]}`;
+          return DARWIN_BOOT_ID_PATTERN.test(bootId) ? bootId : null;
+        }
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  return null;
+}
+
+function readBootId(): string | null {
+  if (cachedBootId !== undefined) return cachedBootId;
+  cachedBootId = readBootIdUncached();
+  return cachedBootId;
 }
 
 /**
- * Reads field 22 (starttime) of /proc/<pid>/stat. The comm field may contain
- * spaces and parentheses, so parsing starts after the final ')' in the line;
- * after that point field N lives at index N - 3 (state is field 3).
+ * Reads a process starttime identity used for PID-reuse detection.
+ *
+ * - Linux: field 22 of `/proc/<pid>/stat` (clock ticks since boot)
+ * - Darwin: `ps -p <pid> -o lstart=` under LC_ALL=C, stored as unix-ms digits
+ *   so the coordination row stays a simple numeric string
  */
-function readProcStat(pid: number): ProcStatResult {
+function readLinuxProcStat(pid: number): ProcStatResult {
   let stat: string;
   try {
     stat = readFileSync(`/proc/${pid}/stat`, "utf-8");
@@ -114,6 +155,41 @@ function readProcStat(pid: number): ProcStatResult {
   return starttime && /^\d+$/.test(starttime)
     ? { status: "ok", starttime }
     : { status: "unreadable" };
+}
+
+function readDarwinStarttime(pid: number): ProcStatResult {
+  try {
+    const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
+      encoding: "utf8",
+      timeout: 2_000,
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
+    });
+    if (result.status !== 0) {
+      // ps exits non-zero when the PID is gone (or invalid). Treat as absent
+      // so the signal-0 probe can confirm death under hidepid-like cases.
+      return { status: "absent" };
+    }
+    const lstart = typeof result.stdout === "string" ? result.stdout.trim() : "";
+    if (!lstart) return { status: "absent" };
+    // Store the raw LC_ALL=C lstart text. Do NOT Date.parse — JS date-time
+    // parsing without a timezone is implementation-defined and can disagree
+    // across bun test vs worker processes (UTC vs local), which would make a
+    // live holder look like PID reuse.
+    return { status: "ok", starttime: `darwin:${lstart}` };
+  } catch {
+    return { status: "unreadable" };
+  }
+}
+
+function readProcStat(pid: number): ProcStatResult {
+  if (process.platform === "linux") {
+    return readLinuxProcStat(pid);
+  }
+  if (process.platform === "darwin") {
+    return readDarwinStarttime(pid);
+  }
+  // Other platforms: no starttime identity; dead detection falls back to signals.
+  return { status: "unreadable" };
 }
 
 function currentProcessIdentity(): ProcessIdentity {
@@ -146,8 +222,8 @@ function coerceOptionalString(value: unknown): string | null {
 /**
  * Boot id of a stored owner record. Three distinct states:
  *  - "none"  — column is NULL: legitimately recorded on a platform without
- *              /proc (conservative signal-probe fallback applies);
- *  - "known" — a well-formed Linux boot id string;
+ *              boot identity (conservative signal-probe fallback applies);
+ *  - "known" — a well-formed Linux UUID or Darwin `darwin-boot-<sec>` string;
  *  - invalid — anything else (garbage string, number, object, …). Never
  *              null-coerced: an owner whose boot id we cannot interpret is
  *              an untrusted record and the lock is not acquired (fail-closed).
@@ -156,7 +232,7 @@ type StoredBootId = { kind: "none" } | { kind: "known"; value: string };
 
 function parseStoredBootId(value: unknown): StoredBootId | null {
   if (value === null) return { kind: "none" };
-  if (typeof value === "string" && BOOT_ID_PATTERN.test(value)) {
+  if (typeof value === "string" && isKnownBootId(value)) {
     return { kind: "known", value };
   }
   return null;
@@ -183,7 +259,11 @@ function parseOwnerRow(
   let starttime: string | null = null;
   if (row["starttime"] !== null && row["starttime"] !== undefined) {
     const raw = row["starttime"];
-    if (typeof raw !== "string" || !/^\d+$/.test(raw)) {
+    if (typeof raw !== "string" || raw.length === 0 || raw.length > 160) {
+      return { ok: false, reason: "invalid starttime" };
+    }
+    // Linux stores /proc starttime as digits; Darwin stores `darwin:<lstart>`.
+    if (!/^\d+$/.test(raw) && !raw.startsWith("darwin:")) {
       return { ok: false, reason: "invalid starttime" };
     }
     starttime = raw;
@@ -204,10 +284,10 @@ function parseOwnerRow(
 /**
  * True only when the recorded owner is *definitively* gone from this
  * machine's current PID namespace:
- *  - its boot id is a valid UUID differing from this machine's current valid
+ *  - its boot id is a known identity differing from this machine's current
  *    boot id (the holder ran under a previous boot), or
- *  - /proc/<pid>/stat is readable and starttime differs (PID reuse), or
- *  - /proc/<pid>/stat is absent AND the signal-0 probe returns ESRCH —
+ *  - process starttime is readable and differs (PID reuse), or
+ *  - process starttime lookup is absent AND the signal-0 probe returns ESRCH —
  *    hidepid=2 makes a live holder's /proc entry invisible, so ENOENT alone
  *    is never proof of death, or
  *  - (no startup identity recorded) signal 0 returns ESRCH.
@@ -218,14 +298,10 @@ function parseOwnerRow(
  *
  * Single-machine view: the coordination DB is expected to be shared only by
  * processes on one host. A record written by a process in another PID
- * namespace is beyond what local /proc can attest and conservatively reads
- * as not-dead.
+ * namespace is beyond what local process tables can attest and conservatively
+ * reads as not-dead.
  */
-/**
- * Signal-0 liveness probe. ESRCH is the only "dead" outcome: EPERM means
- * alive under another uid (hidepid=2 or another user), and any other error
- * means "unknown", which is never a dead signal.
- */
+
 /**
  * Signal-0 liveness probe. ESRCH is the only "dead" outcome: EPERM means
  * alive under another uid (hidepid=2 or another user), and any other error
@@ -409,4 +485,15 @@ export async function isProfileLearningLockHeld(): Promise<boolean> {
     });
     return false;
   }
+}
+
+/** Boot identity the lock would record for this process (test/inspection helper). */
+export function getProfileLearningBootId(): string | null {
+  return readBootId();
+}
+
+/** Starttime identity the lock would record for `pid` (test/inspection helper). */
+export function getProfileLearningStarttime(pid: number): string | null {
+  const result = readProcStat(pid);
+  return result.status === "ok" ? result.starttime : null;
 }

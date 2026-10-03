@@ -1,8 +1,7 @@
 import { join } from "node:path";
 import { tursoConnectionManager } from "../turso/connection-manager.js";
 import { CONFIG } from "../../config.js";
-import type { InValue } from "@libsql/client";
-import type { TursoDb } from "../turso/turso-db.js";
+import type { SqlValue, TursoDb } from "../turso/turso-db.js";
 
 const USER_PROMPTS_DB_NAME = "user-prompts.db";
 
@@ -72,53 +71,14 @@ export class UserPromptManager {
 
   private async initDatabase(): Promise<void> {
     const db = this.db!;
-    await db.batch([
-      {
-        sql: `
-          CREATE TABLE IF NOT EXISTS user_prompts (
-            id TEXT PRIMARY KEY,
-            session_id TEXT NOT NULL,
-            message_id TEXT NOT NULL,
-            project_path TEXT,
-            content TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            captured INTEGER DEFAULT 0,
-            user_learning_captured BOOLEAN DEFAULT 0,
-            linked_memory_id TEXT,
-            capture_attempts INTEGER DEFAULT 0,
-            provider_id TEXT,
-            model_id TEXT
-          )
-        `,
-      },
-      { sql: "UPDATE user_prompts SET captured = 0 WHERE captured = 2" },
-      { sql: "CREATE INDEX IF NOT EXISTS idx_user_prompts_session ON user_prompts(session_id)" },
-      { sql: "CREATE INDEX IF NOT EXISTS idx_user_prompts_captured ON user_prompts(captured)" },
-      {
-        sql: "CREATE INDEX IF NOT EXISTS idx_user_prompts_created ON user_prompts(created_at DESC)",
-      },
-      { sql: "CREATE INDEX IF NOT EXISTS idx_user_prompts_project ON user_prompts(project_path)" },
-      {
-        sql: "CREATE INDEX IF NOT EXISTS idx_user_prompts_linked ON user_prompts(linked_memory_id)",
-      },
-      {
-        sql: "CREATE INDEX IF NOT EXISTS idx_user_prompts_user_learning ON user_prompts(user_learning_captured)",
-      },
-    ]);
-
-    for (const column of [
-      "capture_attempts INTEGER DEFAULT 0",
-      "provider_id TEXT",
-      "model_id TEXT",
-    ]) {
-      try {
-        await db.run(`ALTER TABLE user_prompts ADD COLUMN ${column}`);
-      } catch (error: any) {
-        if (!String(error?.message ?? error).includes("duplicate column")) {
-          console.warn(`Failed to add ${column.split(" ")[0]} column:`, error);
-        }
-      }
-    }
+    const { applySchemaMigrations, USER_PROMPTS_MIGRATIONS, ensureUserPromptColumns } =
+      await import("../turso/schema-migrations.js");
+    await applySchemaMigrations(db, USER_PROMPTS_MIGRATIONS, {
+      dbPath: this.dbPath,
+      label: "user-prompts.db",
+    });
+    await ensureUserPromptColumns(db);
+    await db.run("UPDATE user_prompts SET captured = 0 WHERE captured = 2");
   }
 
   async savePrompt(
@@ -350,7 +310,7 @@ export class UserPromptManager {
     limit: number = 20
   ): Promise<UserPrompt[]> {
     const db = await this.ready();
-    const params: InValue[] = [`%${query}%`];
+    const params: SqlValue[] = [`%${query}%`];
     let sql = `SELECT * FROM user_prompts WHERE content LIKE ? AND captured = 1`;
     if (projectPath) {
       sql += ` AND REPLACE(project_path, '\\', '/') = ?`;

@@ -1,6 +1,5 @@
 import js from "@eslint/js";
 import prettier from "eslint-config-prettier";
-import reactHooks from "eslint-plugin-react-hooks";
 import globals from "globals";
 import ts from "typescript-eslint";
 
@@ -17,16 +16,6 @@ export default ts.config(
   },
   js.configs.recommended,
   ...ts.configs.recommended,
-  {
-    files: ["web/src/**/*.{ts,tsx}"],
-    plugins: {
-      "react-hooks": reactHooks,
-    },
-    rules: {
-      "react-hooks/exhaustive-deps": "error",
-      "react-hooks/rules-of-hooks": "error",
-    },
-  },
   prettier,
   {
     languageOptions: {
@@ -46,6 +35,14 @@ export default ts.config(
           varsIgnorePattern: "^_",
         },
       ],
+    },
+  },
+  {
+    files: ["web/src/**/*.svelte.ts", "web/src/**/*.svelte.js"],
+    languageOptions: {
+      parserOptions: {
+        extraFileExtensions: [".svelte"],
+      },
     },
   }
 );

@@ -1,4 +1,4 @@
-import { existsSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import { tursoShardManager } from "./turso/shard-manager.js";
 import { tursoConnectionManager } from "./turso/connection-manager.js";
 import { tursoVectorSearch } from "./turso/vector-search.js";
@@ -9,7 +9,11 @@ import { log } from "./logger.js";
 import { formatTagsForEmbedding } from "./turso/vector-utils.js";
 import type { MemoryRecord, ShardInfo } from "./turso/types.js";
 import { acquireTursoOperationLock } from "./turso/operation-lock.js";
-import { withSqliteFileLockRetry } from "./turso/sqlite-handle-release.js";
+import {
+  withSqliteFileLockRetry,
+  renameSqliteDatabase,
+  removeSqliteDatabase,
+} from "./turso/sqlite-handle-release.js";
 
 export interface DimensionMismatch {
   needsMigration: boolean;
@@ -354,11 +358,11 @@ export class MigrationService {
         "utf-8"
       );
       await tursoConnectionManager.closeConnection(shard.dbPath);
-      await withSqliteFileLockRetry(() => renameSync(shard.dbPath, backupPath));
+      await withSqliteFileLockRetry(() => renameSqliteDatabase(shard.dbPath, backupPath));
       try {
-        await withSqliteFileLockRetry(() => renameSync(stagedPath, shard.dbPath));
+        await withSqliteFileLockRetry(() => renameSqliteDatabase(stagedPath, shard.dbPath));
       } catch (error) {
-        await withSqliteFileLockRetry(() => renameSync(backupPath, shard.dbPath));
+        await withSqliteFileLockRetry(() => renameSqliteDatabase(backupPath, shard.dbPath));
         throw error;
       }
 
@@ -373,7 +377,7 @@ export class MigrationService {
     } catch (error) {
       await tursoConnectionManager.closeConnection(stagedPath);
       if (existsSync(stagedPath)) {
-        await withSqliteFileLockRetry(() => unlinkSync(stagedPath));
+        await withSqliteFileLockRetry(() => removeSqliteDatabase(stagedPath));
       }
       if (existsSync(swapStatePath) && existsSync(shard.dbPath)) {
         unlinkSync(swapStatePath);

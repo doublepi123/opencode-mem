@@ -103,17 +103,18 @@ function cleanupOldLogs() {
 }
 
 function ensureLoggerInitialized() {
-  if ((globalThis as any)[GLOBAL_LOGGER_KEY]) return;
   const logDir = getLogDirPath();
-  const logFile = getLogFilePath();
+  // Re-init when the log directory changes (tests sandbox HOME / USERPROFILE).
+  if ((globalThis as any)[GLOBAL_LOGGER_KEY] === logDir && existsSync(logDir)) return;
   if (!existsSync(logDir)) {
     mkdirSync(logDir, { recursive: true });
   }
   rotateLog();
+  const logFile = getLogFilePath();
   writeFileSync(logFile, `\n--- Session started: ${formatTimestamp(new Date())} ---\n`, {
     flag: "a",
   });
-  (globalThis as any)[GLOBAL_LOGGER_KEY] = true;
+  (globalThis as any)[GLOBAL_LOGGER_KEY] = logDir;
 }
 
 export function log(message: string, data?: unknown) {
@@ -130,5 +131,14 @@ export function log(message: string, data?: unknown) {
   const line = data
     ? `[${timestamp}] ${message}: ${JSON.stringify(data)}\n`
     : `[${timestamp}] ${message}\n`;
-  appendFileSync(logFile, line);
+  try {
+    appendFileSync(logFile, line);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") throw error;
+    // Directory may have been removed after init (parallel test sandboxes).
+    (globalThis as any)[GLOBAL_LOGGER_KEY] = undefined;
+    ensureLoggerInitialized();
+    appendFileSync(logFile, line);
+  }
 }

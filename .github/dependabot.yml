@@ -18,9 +18,6 @@ updates:
           - "minor"
           - "patch"
     ignore:
-      # Keep this pin until onnxruntime ships a darwin/x64 build after the
-      # macOS Ort::Env teardown fix (#27961 / #24579) and OpenCode embeds Bun >1.3.14.
-      - dependency-name: "onnxruntime-node"
       # ESLint 10 / typescript-eslint do not support TypeScript 7 yet (peer: <6.1.0).
       - dependency-name: "typescript"
         versions: [">=7"]

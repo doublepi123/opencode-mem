@@ -1,0 +1,161 @@
+{
+  "items": [
+    {
+      "id": "mem_pin_architecture",
+      "type": "memory",
+      "content": "Keep a clear split between the SPA and the API: the frontend only talks to /api; shared request/response types live in a common package.",
+      "createdAt": "2026-09-12T10:00:00.000Z",
+      "updatedAt": "2026-09-28T14:22:00.000Z",
+      "displayName": "checkout-web",
+      "projectName": "checkout-web",
+      "projectPath": "/workspace/checkout-web",
+      "memoryType": "architecture",
+      "tags": ["frontend", "api", "architecture"],
+      "isPinned": true
+    },
+    {
+      "id": "mem_rule_confirm",
+      "type": "memory",
+      "content": "Never use the browser confirm dialog for destructive actions — always use an in-app confirmation modal.",
+      "createdAt": "2026-09-20T09:15:00.000Z",
+      "updatedAt": "2026-10-01T18:40:00.000Z",
+      "displayName": "checkout-web",
+      "projectName": "checkout-web",
+      "memoryType": "rule",
+      "tags": ["ui", "dialogs"],
+      "isPinned": true
+    },
+    {
+      "id": "mem_feature_toast",
+      "type": "memory",
+      "content": "Notifications use a stacked toast component with success, error, warning, and info variants.",
+      "createdAt": "2026-09-22T11:00:00.000Z",
+      "displayName": "checkout-web",
+      "projectName": "checkout-web",
+      "memoryType": "feature",
+      "tags": ["toast", "ui"],
+      "isPinned": false
+    },
+    {
+      "id": "mem_brand_tokens",
+      "type": "memory",
+      "content": "Brand accent tokens live in the global stylesheet. Keep favicon and marketing assets in sync with those colors.",
+      "createdAt": "2026-10-02T09:00:00.000Z",
+      "displayName": "checkout-web",
+      "projectName": "checkout-web",
+      "memoryType": "documentation",
+      "tags": ["brand", "css"],
+      "isPinned": false
+    },
+    {
+      "id": "mem_pair_auth",
+      "type": "memory",
+      "content": "The SPA injects an auth token at boot and sends it as a custom header on every API request.",
+      "createdAt": "2026-09-18T16:30:00.000Z",
+      "displayName": "checkout-web",
+      "projectName": "checkout-web",
+      "memoryType": "configuration",
+      "tags": ["auth", "api"],
+      "isPinned": false,
+      "linkedPromptId": "prompt_pair_auth"
+    },
+    {
+      "id": "prompt_pair_auth",
+      "type": "prompt",
+      "content": "How does the web UI authenticate against the backend API?",
+      "createdAt": "2026-09-18T16:29:00.000Z",
+      "displayName": "checkout-web",
+      "projectName": "checkout-web",
+      "tags": ["auth"],
+      "linkedMemoryId": "mem_pair_auth"
+    },
+    {
+      "id": "mem_bugfix_search",
+      "type": "memory",
+      "content": "Search input is a fixed-height rounded field with a search icon on the right. Clear only appears while a search is active.",
+      "createdAt": "2026-09-25T13:10:00.000Z",
+      "displayName": "checkout-web",
+      "projectName": "checkout-web",
+      "memoryType": "bug-fix",
+      "tags": ["search", "ui"],
+      "isPinned": false
+    },
+    {
+      "id": "mem_refactor_stores",
+      "type": "memory",
+      "content": "Explorer state lives in small store factories with reactive state — avoid mixing UI and fetch logic in components.",
+      "createdAt": "2026-09-15T08:00:00.000Z",
+      "displayName": "checkout-web",
+      "projectName": "checkout-web",
+      "memoryType": "refactor",
+      "tags": ["stores", "frontend"],
+      "isPinned": false
+    },
+    {
+      "id": "mem_api_filter",
+      "type": "memory",
+      "content": "List endpoints support multi-value tag filters as OR. Empty filter returns the full page.",
+      "createdAt": "2026-09-27T17:45:00.000Z",
+      "displayName": "inventory-api",
+      "projectName": "inventory-api",
+      "memoryType": "feature",
+      "tags": ["filter", "api"],
+      "isPinned": false
+    },
+    {
+      "id": "mem_api_pagination",
+      "type": "memory",
+      "content": "Pagination is page + pageSize on the server. Clients should not slice large payloads locally.",
+      "createdAt": "2026-09-28T12:00:00.000Z",
+      "displayName": "inventory-api",
+      "projectName": "inventory-api",
+      "memoryType": "discussion",
+      "tags": ["pagination"],
+      "isPinned": false,
+      "linkedPromptId": "prompt_api_pagination"
+    },
+    {
+      "id": "prompt_api_pagination",
+      "type": "prompt",
+      "content": "Should the inventory list paginate on the server or in the client?",
+      "createdAt": "2026-09-28T11:55:00.000Z",
+      "displayName": "inventory-api",
+      "projectName": "inventory-api",
+      "tags": ["pagination"],
+      "linkedMemoryId": "mem_api_pagination"
+    },
+    {
+      "id": "mem_docs_i18n",
+      "type": "memory",
+      "content": "UI strings live in a central translations map. Prefer Title Case labels; avoid SCREAMING labels.",
+      "createdAt": "2026-09-10T07:20:00.000Z",
+      "displayName": "docs-portal",
+      "projectName": "docs-portal",
+      "memoryType": "documentation",
+      "tags": ["i18n"],
+      "isPinned": false
+    },
+    {
+      "id": "mem_analysis_search",
+      "type": "memory",
+      "content": "Semantic search uses local embeddings with cosine similarity so no cloud API keys are required for basic ranking.",
+      "createdAt": "2026-09-05T19:00:00.000Z",
+      "displayName": "checkout-web",
+      "projectName": "checkout-web",
+      "memoryType": "analysis",
+      "tags": ["search", "embeddings"],
+      "isPinned": false
+    },
+    {
+      "id": "mem_config_local",
+      "type": "memory",
+      "content": "Local fixture mode serves static JSON from a fixtures folder so the UI can be developed without a live database.",
+      "createdAt": "2026-10-02T11:30:00.000Z",
+      "displayName": "checkout-web",
+      "projectName": "checkout-web",
+      "memoryType": "configuration",
+      "tags": ["dev", "fixtures"],
+      "isPinned": false
+    }
+  ]
+}

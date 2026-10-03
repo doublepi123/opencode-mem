@@ -14,6 +14,14 @@ export interface ProviderConfig {
   maxTokens?: number;
   memoryTemperature?: number | false;
   extraParams?: Record<string, unknown>;
+  /**
+   * Force the model to emit a tool call instead of free text. Defaults to true
+   * on chat-completion providers: prompts already demand a tool call, and
+   * `tool_choice: "auto"` lets some models answer in prose, which silently
+   * drops the structured result (see tag migration). Set to false to opt out
+   * for providers that reject `tool_choice: "required"`.
+   */
+  forceToolChoice?: boolean;
 }
 
 const PROTECTED_KEYS = new Set([

@@ -1,0 +1,33 @@
+{
+  "success": true,
+  "data": {
+    "project": [
+      {
+        "tag": "checkout-web",
+        "displayName": "checkout-web",
+        "projectName": "checkout-web",
+        "projectPath": "/workspace/checkout-web",
+        "gitRepoUrl": "https://github.com/example/checkout-web"
+      },
+      {
+        "tag": "inventory-api",
+        "displayName": "inventory-api",
+        "projectName": "inventory-api",
+        "projectPath": "/workspace/inventory-api"
+      },
+      {
+        "tag": "docs-portal",
+        "displayName": "docs-portal",
+        "projectName": "docs-portal"
+      }
+    ],
+    "user": [
+      {
+        "tag": "user_sample",
+        "displayName": "Sample User",
+        "userName": "sample",
+        "userEmail": "sample@example.com"
+      }
+    ]
+  }
+}

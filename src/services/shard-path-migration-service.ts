@@ -1,11 +1,4 @@
-import {
-  copyFileSync,
-  existsSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, join, relative, resolve } from "node:path";
 import { CONFIG } from "../config.js";
 import { extractScopeFromContainerTag } from "./memory-scope.js";
@@ -15,7 +8,12 @@ import { acquireTursoOperationLock } from "./turso/operation-lock.js";
 import { tursoShardManager } from "./turso/shard-manager.js";
 import { tursoConnectionManager } from "./turso/connection-manager.js";
 import { tursoVectorSearch } from "./turso/vector-search.js";
-import { withSqliteFileLockRetry } from "./turso/sqlite-handle-release.js";
+import {
+  withSqliteFileLockRetry,
+  renameSqliteDatabase,
+  removeSqliteDatabase,
+  copySqliteDatabase,
+} from "./turso/sqlite-handle-release.js";
 import { log } from "./logger.js";
 import {
   shardInventoryService,
@@ -104,7 +102,7 @@ async function countLiveMemories(dbPath: string): Promise<number> {
 async function removeFile(path: string): Promise<void> {
   await tursoConnectionManager.closeConnection(path);
   if (existsSync(path)) {
-    await withSqliteFileLockRetry(() => unlinkSync(path));
+    await withSqliteFileLockRetry(() => removeSqliteDatabase(path));
   }
 }
 
@@ -288,7 +286,7 @@ export class ShardPathMigrationService {
           throw new Error(`Source shard file missing: ${move.oldPath}`);
         }
         await removeFile(move.stagedPath);
-        copyFileSync(move.oldPath, move.stagedPath);
+        copySqliteDatabase(move.oldPath, move.stagedPath);
 
         const stagedDb = await tursoConnectionManager.getConnection(move.stagedPath);
         await tursoVectorSearch.updateProjectAssociation(stagedDb, move.oldContainerTag, {
@@ -334,11 +332,11 @@ export class ShardPathMigrationService {
 
       for (const move of moves) {
         await tursoConnectionManager.closeConnection(move.oldPath);
-        await withSqliteFileLockRetry(() => renameSync(move.oldPath, move.backupPath));
+        await withSqliteFileLockRetry(() => renameSqliteDatabase(move.oldPath, move.backupPath));
         try {
-          await withSqliteFileLockRetry(() => renameSync(move.stagedPath, move.newPath));
+          await withSqliteFileLockRetry(() => renameSqliteDatabase(move.stagedPath, move.newPath));
         } catch (error) {
-          await withSqliteFileLockRetry(() => renameSync(move.backupPath, move.oldPath));
+          await withSqliteFileLockRetry(() => renameSqliteDatabase(move.backupPath, move.oldPath));
           throw error;
         }
 
@@ -404,7 +402,7 @@ export class ShardPathMigrationService {
         if (existsSync(move.backupPath)) {
           await removeFile(move.newPath);
           await removeFile(move.oldPath);
-          await withSqliteFileLockRetry(() => renameSync(move.backupPath, move.oldPath));
+          await withSqliteFileLockRetry(() => renameSqliteDatabase(move.backupPath, move.oldPath));
         }
         await removeFile(move.stagedPath);
         if (existsSync(move.oldPath)) {
@@ -427,7 +425,7 @@ export class ShardPathMigrationService {
         if (archived.archivePath && existsSync(archived.archivePath)) {
           await removeFile(archived.originalPath);
           await withSqliteFileLockRetry(() =>
-            renameSync(archived.archivePath!, archived.originalPath)
+            renameSqliteDatabase(archived.archivePath!, archived.originalPath)
           );
           await tursoShardManager.registerExistingShard(
             "project",

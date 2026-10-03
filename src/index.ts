@@ -24,7 +24,9 @@ import { getHostClientConfig } from "./services/ai/opencode-host-config.js";
 import { loadOpencodeProvider } from "./services/ai/opencode-provider-loader.js";
 import {
   isInternalStructuredSession,
+  noteStructuredOutputStep,
   STRUCTURED_OUTPUT_AGENT,
+  STRUCTURED_OUTPUT_MAX_STEPS,
   STRUCTURED_OUTPUT_TOOLS,
 } from "./services/ai/opencode-provider.js";
 
@@ -141,6 +143,41 @@ export async function resolveSessionAgent(
   return undefined;
 }
 
+/**
+ * Resolve the session's current model (the server-side `session.model`, written by the most
+ * recent real user message and left untouched by compaction). Compaction memory injection must
+ * pass it explicitly: OpenCode resolves `input.model ?? agent.model ?? session.model`, so when the
+ * active agent declares its own model the injected message would otherwise switch the session to
+ * that agent's default model and variant.
+ */
+export async function resolveSessionModel(
+  client: unknown,
+  sessionID: string
+): Promise<{ model: { providerID: string; modelID: string }; variant?: string } | undefined> {
+  const sessionClient = (client as { session?: { get?: (args: unknown) => Promise<unknown> } })
+    ?.session;
+  if (typeof sessionClient?.get !== "function") return undefined;
+
+  try {
+    const session = unwrapSdkData<{
+      model?: { providerID?: string; id?: string; variant?: string };
+    }>(await sessionClient.get({ path: { id: sessionID } }));
+    const model = session?.model;
+    if (typeof model?.providerID !== "string" || typeof model?.id !== "string") return undefined;
+    const variant =
+      typeof model.variant === "string" && model.variant && model.variant !== "default"
+        ? model.variant
+        : undefined;
+    return {
+      model: { providerID: model.providerID, modelID: model.id },
+      ...(variant ? { variant } : {}),
+    };
+  } catch (error) {
+    log("resolveSessionModel: session.get failed", { sessionID, error: String(error) });
+    return undefined;
+  }
+}
+
 async function isInternalCaptureSession(client: unknown, sessionID: string): Promise<boolean> {
   // Fast path: sessions we created ourselves (survives brief post-delete window).
   if (isTrackedInternalCaptureSession(sessionID)) {
@@ -189,14 +226,36 @@ export function applyStructuredOutputAgentConfig(cfg: { agent?: Record<string, u
       description: "Internal least-privilege agent for opencode-mem structured output",
       mode: "subagent",
       // OpenCode reads `steps` at runtime; SDK AgentConfig also documents maxSteps.
-      steps: 2,
-      maxSteps: 2,
+      steps: STRUCTURED_OUTPUT_MAX_STEPS,
+      maxSteps: STRUCTURED_OUTPUT_MAX_STEPS,
       tools: STRUCTURED_OUTPUT_TOOLS,
       permission: {
         "*": "deny",
         StructuredOutput: "allow",
       },
+      // OpenCode maps format:json_schema to tool_choice:"required". Thinking-enabled
+      // models (e.g. DeepSeek V4) reject that combo — disable thinking for this
+      // internal agent so auto-capture / profile learning can force StructuredOutput (#253).
+      options: {
+        thinking: { type: "disabled" },
+      },
     },
+  };
+}
+
+/**
+ * Force-disable thinking on structured-output chat.params after OpenCode merges
+ * model/agent/variant options. A user reasoning variant merges last and can
+ * otherwise re-enable thinking (#253).
+ */
+export function applyStructuredOutputChatParams(
+  input: { agent?: unknown },
+  output: { options?: Record<string, unknown> } | undefined
+): void {
+  if (!output || input.agent !== STRUCTURED_OUTPUT_AGENT) return;
+  output.options = {
+    ...(output.options ?? {}),
+    thinking: { type: "disabled" },
   };
 }
 
@@ -240,6 +299,8 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
   const { directory } = ctx;
   initConfig(directory);
   logAutoCaptureProviderStatus();
+  const { startAutoUpdate } = await import("./services/auto-update.js");
+  startAutoUpdate(ctx, CONFIG.autoUpdate);
   const tags = getTags(directory);
   let webServer: WebServer | null = null;
   let idleTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -288,11 +349,18 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
     } catch (error) {
       log("Turso ready gate failed before web server start", { error: String(error) });
       if (ctx.client?.tui) {
+        const { isTursoMultiProcessLockError } =
+          await import("./services/turso/connection-manager.js");
+        const lockHeld = isTursoMultiProcessLockError(error);
         ctx.client.tui
           .showToast({
             body: {
               title: "Memory Explorer",
-              message: "Database migration failed; web UI not started",
+              message: lockHeld
+                ? process.platform === "win32"
+                  ? "Memory DB locked by another OpenCode session (Windows is single-owner)"
+                  : "Memory DB locked by another session — close it or restart all OpenCode windows"
+                : "Database migration failed; web UI not started",
               variant: "error",
               duration: 8000,
             },
@@ -316,7 +384,6 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
     })
       .then((server) => {
         webServer = server;
-        log("profile-learning web ownership", { directory, owner: webServer.isServerOwner() });
         const url = webServer.getUrl();
 
         webServer.setOnTakeoverCallback(async () => {
@@ -447,9 +514,95 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
     await cleanupPlugin();
   };
 
+  // Capture remains tied to authored prompts. V2 can rebuild request context
+  // independently when its in-memory session cache is lost on host/plugin reload.
+  const capturePrompt = async (
+    sessionID: string,
+    messageID: string,
+    parts: Part[]
+  ): Promise<boolean> => {
+    if (!isConfigured() || !CONFIG.chatMessage.enabled) return false;
+
+    const textParts = parts.filter(
+      (p): p is Part & { type: "text"; text: string } => p.type === "text"
+    );
+
+    if (textParts.length === 0) return false;
+
+    // Host- and plugin-injected blocks reach this hook through the same
+    // parts array as real user input. Recording them would train both
+    // auto-capture and profile learning on another plugin's boilerplate.
+    const authoredParts = CONFIG.chatMessage.filterInjectedPrompts
+      ? filterInjectedParts(textParts, CONFIG.chatMessage.injectionMarkers)
+      : textParts;
+
+    if (authoredParts.length === 0) return false;
+    const userMessage = authoredParts.map((p) => p.text).join("\n");
+    if (!userMessage.trim()) return false;
+
+    if (isStructuredSummaryPromptMessage(userMessage) || isInternalStructuredSession(sessionID)) {
+      return false;
+    }
+
+    await userPromptManager.savePrompt(sessionID, messageID, directory, userMessage);
+    return true;
+  };
+
+  const loadMemoryContext = async (sessionID: string): Promise<string> => {
+    const listResult = await memoryClient.listMemories(
+      tags.project.tag,
+      CONFIG.chatMessage.maxMemories
+    );
+
+    let memories = listResult.success ? listResult.memories : [];
+
+    if (CONFIG.chatMessage.excludeCurrentSession) {
+      memories = memories.filter((m: any) => m.metadata?.sessionID !== sessionID);
+    }
+
+    if (CONFIG.chatMessage.maxAgeDays) {
+      const cutoffDate = Date.now() - CONFIG.chatMessage.maxAgeDays * 86400000;
+      memories = memories.filter((m: any) => new Date(m.createdAt).getTime() > cutoffDate);
+    }
+
+    if (memories.length === 0) return "";
+
+    const projectMemories = {
+      results: memories.map((m: any) => ({
+        similarity: 1.0,
+        memory: m.summary,
+      })),
+      total: memories.length,
+      timing: 0,
+    };
+
+    const userId = tags.user.userEmail || null;
+    return formatContextForPrompt(userId, projectMemories);
+  };
+
   return {
     // V1 ignores this extra hook; the V2 adapter uses it during plugin reload.
     dispose: disposePlugin,
+    // Internal V2 bridge; V1 still injects synthetic parts through chat.message.
+    memoryContext: {
+      enabled: () => isConfigured() && CONFIG.chatMessage.enabled,
+      refreshOnPrompt: () => CONFIG.chatMessage.injectOn === "always",
+      capturePrompt: async (
+        input: { sessionID: string },
+        output: { message: { id: string }; parts: Part[] }
+      ) => capturePrompt(input.sessionID, output.message.id, output.parts),
+      load: async (sessionID: string) => {
+        if (
+          !isConfigured() ||
+          !CONFIG.chatMessage.enabled ||
+          isInternalStructuredSession(sessionID) ||
+          (await isInternalCaptureSession(ctx.client, sessionID))
+        ) {
+          return "";
+        }
+        return loadMemoryContext(sessionID);
+      },
+    },
     config: async (cfg) => {
       applyStructuredOutputAgentConfig(cfg);
     },
@@ -458,36 +611,7 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
       if (!isConfigured() || !CONFIG.chatMessage.enabled) return;
 
       try {
-        const textParts = output.parts.filter(
-          (p): p is Part & { type: "text"; text: string } => p.type === "text"
-        );
-
-        if (textParts.length === 0) return;
-
-        // Host- and plugin-injected blocks reach this hook through the same
-        // parts array as real user input. Recording them would train both
-        // auto-capture and profile learning on another plugin's boilerplate.
-        const authoredParts = CONFIG.chatMessage.filterInjectedPrompts
-          ? filterInjectedParts(textParts, CONFIG.chatMessage.injectionMarkers)
-          : textParts;
-
-        if (authoredParts.length === 0) return;
-        const userMessage = authoredParts.map((p) => p.text).join("\n");
-        if (!userMessage.trim()) return;
-
-        if (
-          isStructuredSummaryPromptMessage(userMessage) ||
-          isInternalStructuredSession(input.sessionID)
-        ) {
-          return;
-        }
-
-        await userPromptManager.savePrompt(
-          input.sessionID,
-          output.message.id,
-          directory,
-          userMessage
-        );
+        if (!(await capturePrompt(input.sessionID, output.message.id, output.parts))) return;
 
         const messagesResponse = await ctx.client.session.messages({
           path: { id: input.sessionID },
@@ -515,35 +639,7 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
 
         if (!shouldInject) return;
 
-        const listResult = await memoryClient.listMemories(
-          tags.project.tag,
-          CONFIG.chatMessage.maxMemories
-        );
-
-        let memories = listResult.success ? listResult.memories : [];
-
-        if (CONFIG.chatMessage.excludeCurrentSession) {
-          memories = memories.filter((m: any) => m.metadata?.sessionID !== input.sessionID);
-        }
-
-        if (CONFIG.chatMessage.maxAgeDays) {
-          const cutoffDate = Date.now() - CONFIG.chatMessage.maxAgeDays * 86400000;
-          memories = memories.filter((m: any) => new Date(m.createdAt).getTime() > cutoffDate);
-        }
-
-        if (memories.length === 0) return;
-
-        const projectMemories = {
-          results: memories.map((m: any) => ({
-            similarity: 1.0,
-            memory: m.summary,
-          })),
-          total: memories.length,
-          timing: 0,
-        };
-
-        const userId = tags.user.userEmail || null;
-        const memoryContext = await formatContextForPrompt(userId, projectMemories);
+        const memoryContext = await loadMemoryContext(input.sessionID);
 
         if (memoryContext) {
           const contextPart: Part = {
@@ -573,7 +669,9 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
       }
     },
 
-    "chat.params": async (input) => {
+    "chat.params": async (input, output) => {
+      applyStructuredOutputChatParams(input, output);
+
       if (!isConfigured() || CONFIG.opencodeModel !== "inherit") return;
 
       try {
@@ -780,6 +878,10 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
 
                 const { userProfileManager } =
                   await import("./services/user-profile/user-profile-manager.js");
+                const { toPublicProfileData } =
+                  await import("./services/user-profile/profile-utils.js");
+                const { tryAcquireProfileLearningLock } =
+                  await import("./services/user-profile/learning-lock.js");
 
                 const userId = tags.user.userEmail || "unknown";
 
@@ -806,38 +908,52 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
                     return JSON.stringify({ success: false, error: "Private content blocked" });
                   }
 
-                  const newPreference = {
-                    category: "explicit",
-                    description: sanitizedContent,
-                    confidence: 1.0,
-                    frequency: 1,
-                    evidence: ["manual-write"],
-                    lastSeen: Date.now(),
-                  };
-
-                  const existingProfile = await userProfileManager.getActiveProfile(userId);
-
-                  if (existingProfile) {
-                    const existingData = JSON.parse(existingProfile.profileData);
-                    const mergedData = await userProfileManager.mergeProfileData(
-                      existingData,
-                      {
-                        preferences: [newPreference],
-                      },
-                      undefined,
-                      existingProfile.id
-                    );
-                    await userProfileManager.updateProfile(
-                      existingProfile.id,
-                      mergedData,
-                      0,
-                      `Explicit preference added: ${sanitizedContent.slice(0, 80)}`
-                    );
+                  // Hold the same non-reentrant learning lock as performUserProfileLearning
+                  // so mergeProfileData's cold-buffer round cannot race learning. Do not
+                  // acquire inside mergeProfileData — learning already holds this lock.
+                  const releaseProfileWriteLock = await tryAcquireProfileLearningLock(directory);
+                  if (!releaseProfileWriteLock) {
                     return JSON.stringify({
-                      success: true,
-                      message: "Preference saved to profile",
+                      success: false,
+                      error:
+                        "Profile preference save is temporarily unavailable because profile learning holds the lock. Retry shortly.",
                     });
-                  } else {
+                  }
+
+                  try {
+                    const newPreference = {
+                      category: "explicit",
+                      description: sanitizedContent,
+                      confidence: 1.0,
+                      frequency: 1,
+                      evidence: ["manual-write"],
+                      lastSeen: Date.now(),
+                    };
+
+                    const existingProfile = await userProfileManager.getActiveProfile(userId);
+
+                    if (existingProfile) {
+                      const existingData = JSON.parse(existingProfile.profileData);
+                      const mergedData = await userProfileManager.mergeProfileData(
+                        existingData,
+                        {
+                          preferences: [newPreference],
+                        },
+                        undefined,
+                        existingProfile.id
+                      );
+                      await userProfileManager.updateProfile(
+                        existingProfile.id,
+                        mergedData,
+                        0,
+                        `Explicit preference added: ${sanitizedContent.slice(0, 80)}`
+                      );
+                      return JSON.stringify({
+                        success: true,
+                        message: "Preference saved to profile",
+                      });
+                    }
+
                     await userProfileManager.createProfile(
                       userId,
                       tags.user.displayName || userId,
@@ -850,13 +966,15 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
                       success: true,
                       message: "Profile created with preference",
                     });
+                  } finally {
+                    await releaseProfileWriteLock();
                   }
                 }
 
                 // --- READ: no content provided ---
                 const profile = await userProfileManager.getActiveProfile(userId);
                 if (!profile) return JSON.stringify({ success: true, profile: null });
-                const pData = JSON.parse(profile.profileData);
+                const pData = toPublicProfileData(JSON.parse(profile.profileData));
                 return JSON.stringify({
                   success: true,
                   profile: {
@@ -948,6 +1066,33 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
 
     event: async (input: { event: { type: string; properties?: any } }) => {
       const event = input.event;
+
+      // Client-side step watchdog for internal structured-output sessions (#278).
+      // OpenCode's agent.steps soft-cap does not hard-stop json_schema loops when
+      // forced StructuredOutput keeps failing (e.g. opencode-claude-auth).
+      if (event.type === "message.part.updated") {
+        const part = event.properties?.part;
+        if (part?.type === "step-start" && typeof part.sessionID === "string") {
+          const { shouldAbort, steps } = noteStructuredOutputStep(part.sessionID);
+          if (shouldAbort) {
+            log("Aborting structured-output session after step budget", {
+              sessionID: part.sessionID,
+              steps,
+              maxSteps: STRUCTURED_OUTPUT_MAX_STEPS,
+            });
+            try {
+              await ctx.client.session.abort({ path: { id: part.sessionID } });
+            } catch (error) {
+              log("structured-output step abort failed", {
+                sessionID: part.sessionID,
+                error: String(error),
+              });
+            }
+          }
+        }
+        return;
+      }
+
       if (event.type === "session.idle") {
         if (!isConfigured() || !CONFIG.autoCaptureEnabled) return;
         const sessionID = event.properties?.sessionID;
@@ -972,11 +1117,6 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
             // whenever the owner stops seeing sessions, and disables learning
             // outright when the web server is off. Any active instance may learn;
             // performUserProfileLearning holds a cross-process lock internally.
-            log("profile-learning idle trigger", {
-              directory,
-              sessionID,
-              webOwner: webServer?.isServerOwner() ?? false,
-            });
             await performUserProfileLearning(ctx, directory);
 
             // Retention cleanup stays owner-only: it is storage-wide maintenance
@@ -1023,6 +1163,7 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
             );
             return;
           }
+          const current = await resolveSessionModel(ctx.client, sessionID);
 
           await ctx.client.session.prompt({
             path: { id: sessionID },
@@ -1037,6 +1178,8 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
               ],
               noReply: true,
               agent,
+              ...(current ? { model: current.model } : {}),
+              ...(current?.variant ? { variant: current.variant } : {}),
             },
           });
 
@@ -1057,6 +1200,7 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
             sessionID,
             count: memoriesResult.results.length,
             agent: agent ?? null,
+            model: current ? `${current.model.providerID}/${current.model.modelID}` : null,
           });
         } catch (error) {
           log("Compaction handler error", { error: String(error) });

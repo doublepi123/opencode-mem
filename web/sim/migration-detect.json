@@ -1,0 +1,9 @@
+{
+  "success": true,
+  "data": {
+    "needsMigration": false,
+    "configDimensions": 384,
+    "configModel": "Xenova/all-MiniLM-L6-v2",
+    "shardMismatches": []
+  }
+}

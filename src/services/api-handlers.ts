@@ -11,6 +11,7 @@ import type { MemoryType } from "../types/index.js";
 import { userPromptManager } from "./user-prompt/user-prompt-manager.js";
 import type { UserProfileData } from "./user-profile/types.js";
 import { sortProfileItems } from "../utils/profile.js";
+import { toPublicProfileData } from "./user-profile/profile-utils.js";
 import type { ShardInfo } from "./turso/types.js";
 
 async function getAllMemoryShards(): Promise<ShardInfo[]> {
@@ -108,39 +109,54 @@ function getProjectPathFromTag(tag: string): Promise<string | undefined> {
   })();
 }
 
-export async function handleListTags(): Promise<ApiResponse<{ project: TagInfo[] }>> {
+function tagInfoFromDistinctRow(t: Record<string, unknown>): TagInfo | null {
+  if (!t.container_tag) return null;
+  return {
+    tag: String(t.container_tag),
+    displayName: t.display_name ? String(t.display_name) : undefined,
+    userName: t.user_name ? String(t.user_name) : undefined,
+    userEmail: t.user_email ? String(t.user_email) : undefined,
+    projectPath: t.project_path ? String(t.project_path) : undefined,
+    projectName: t.project_name ? String(t.project_name) : undefined,
+    gitRepoUrl: t.git_repo_url ? String(t.git_repo_url) : undefined,
+  };
+}
+
+async function collectDistinctTags(
+  scope: "user" | "project",
+  marker: "_user_" | "_project_"
+): Promise<TagInfo[]> {
+  const shards = await tursoShardManager.getAllShards(scope, "");
+  const tagsMap = new Map<string, TagInfo>();
+  for (const shard of shards) {
+    const db = await tursoConnectionManager.getConnection(shard.dbPath);
+    const tags = await tursoVectorSearch.getDistinctTags(db);
+    for (const t of tags) {
+      const tagInfo = tagInfoFromDistinctRow(t);
+      if (!tagInfo || tagsMap.has(tagInfo.tag) || !tagInfo.tag.includes(marker)) continue;
+      tagsMap.set(tagInfo.tag, tagInfo);
+    }
+  }
+  return Array.from(tagsMap.values());
+}
+
+export async function handleListTags(): Promise<
+  ApiResponse<{ project: TagInfo[]; user: TagInfo[] }>
+> {
   try {
     await ensureTursoReady();
     // Tags are stored as SQLite metadata; embedding model is not needed.
     // Calling warmup() here would block on local transformer init in the worker
     // thread and hang every read API. Only handlers that compute similarity
     // (e.g. handleSearch) should warm up the embedding service.
-    const projectShards = await tursoShardManager.getAllShards("project", "");
-    const tagsMap = new Map<string, TagInfo>();
-    for (const shard of projectShards) {
-      const db = await tursoConnectionManager.getConnection(shard.dbPath);
-      const tags = await tursoVectorSearch.getDistinctTags(db);
-      for (const t of tags) {
-        if (t.container_tag && !tagsMap.has(String(t.container_tag))) {
-          tagsMap.set(String(t.container_tag), {
-            tag: String(t.container_tag),
-            displayName: t.display_name ? String(t.display_name) : undefined,
-            userName: t.user_name ? String(t.user_name) : undefined,
-            userEmail: t.user_email ? String(t.user_email) : undefined,
-            projectPath: t.project_path ? String(t.project_path) : undefined,
-            projectName: t.project_name ? String(t.project_name) : undefined,
-            gitRepoUrl: t.git_repo_url ? String(t.git_repo_url) : undefined,
-          });
-        }
-      }
-    }
-    const projectTags: TagInfo[] = [];
-    for (const tagInfo of tagsMap.values()) {
-      if (tagInfo.tag.includes("_project_")) {
-        projectTags.push(tagInfo);
-      }
-    }
-    return { success: true, data: { project: projectTags } };
+    //
+    // Return both scopes: the unfiltered explorer list and /api/stats total
+    // already include user + project memories, so the tag dropdown must too.
+    const [project, user] = await Promise.all([
+      collectDistinctTags("project", "_project_"),
+      collectDistinctTags("user", "_user_"),
+    ]);
+    return { success: true, data: { project, user } };
   } catch (error) {
     log("handleListTags: error", { error: String(error) });
     return { success: false, error: String(error) };
@@ -148,7 +164,7 @@ export async function handleListTags(): Promise<ApiResponse<{ project: TagInfo[]
 }
 
 export async function handleListMemories(
-  tag?: string,
+  tag?: string | string[],
   page: number = 1,
   pageSize: number = 20,
   includePrompts: boolean = true
@@ -157,14 +173,30 @@ export async function handleListMemories(
     await ensureTursoReady();
     // Listing only reads SQLite rows; no vector ops happen here.
     // See handleListTags comment - keep embedding init out of read paths.
+    const filterTags = (Array.isArray(tag) ? tag : tag ? [tag] : [])
+      .map((t) => t.trim())
+      .filter(Boolean);
     const allMemories: any[] = [];
-    if (tag) {
-      const { scope: tagScope, hash } = extractScopeFromTag(tag);
-      const shards = await tursoShardManager.getAllShards(tagScope, hash);
-      for (const shard of shards) {
-        const db = await tursoConnectionManager.getConnection(shard.dbPath);
-        const memories = await tursoVectorSearch.listMemories(db, tag, 10000);
-        allMemories.push(...memories);
+    const seenIds = new Set<string>();
+
+    async function pushUnique(memories: any[]) {
+      for (const memory of memories) {
+        const id = String(memory.id);
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        allMemories.push(memory);
+      }
+    }
+
+    if (filterTags.length > 0) {
+      for (const filterTag of filterTags) {
+        const { scope: tagScope, hash } = extractScopeFromTag(filterTag);
+        const shards = await tursoShardManager.getAllShards(tagScope, hash);
+        for (const shard of shards) {
+          const db = await tursoConnectionManager.getConnection(shard.dbPath);
+          const memories = await tursoVectorSearch.listMemories(db, filterTag, 10000);
+          await pushUnique(memories);
+        }
       }
     } else {
       // Iterate both project- and user-scoped shards. Previously this only
@@ -180,8 +212,8 @@ export async function handleListMemories(
       for (const shard of [...projectShards, ...userShards]) {
         const db = await tursoConnectionManager.getConnection(shard.dbPath);
         const memories = await tursoVectorSearch.getAllMemories(db);
-        allMemories.push(
-          ...memories.filter(
+        await pushUnique(
+          memories.filter(
             (m: any) =>
               m.container_tag?.includes("_project_") || m.container_tag?.includes("_user_")
           )
@@ -213,9 +245,18 @@ export async function handleListMemories(
 
     let timeline: any[] = memoriesWithType;
     if (includePrompts) {
-      const projectPath = tag ? await getProjectPathFromTag(tag) : undefined;
-      const prompts = await userPromptManager.getCapturedPrompts(projectPath);
-      const promptsWithType = prompts.map((p) => ({
+      const promptById = new Map<string, any>();
+      if (filterTags.length === 0) {
+        const prompts = await userPromptManager.getCapturedPrompts(undefined);
+        for (const p of prompts) promptById.set(p.id, p);
+      } else {
+        for (const filterTag of filterTags) {
+          const projectPath = await getProjectPathFromTag(filterTag);
+          const prompts = await userPromptManager.getCapturedPrompts(projectPath);
+          for (const p of prompts) promptById.set(p.id, p);
+        }
+      }
+      const promptsWithType = [...promptById.values()].map((p) => ({
         type: "prompt",
         id: p.id,
         sessionId: p.sessionId,
@@ -249,21 +290,38 @@ export async function handleListMemories(
 
     const sortedTimeline: any[] = [];
     const pairValues = Array.from(linkedPairs.values());
-    const pairs = pairValues
-      .filter((p) => p.memory && p.prompt)
-      .sort((a, b) => b.memory.createdAt - a.memory.createdAt);
+    const completePairs = pairValues.filter((p) => p.memory && p.prompt);
     // A memory or prompt whose counterpart is missing (linked prompt deleted,
     // or prompt capture off) must still show up in the timeline, unlinked.
     for (const pair of pairValues) {
       if (pair.memory && !pair.prompt) standalone.push(pair.memory);
       else if (pair.prompt && !pair.memory) standalone.push(pair.prompt);
     }
-    for (const pair of pairs) {
-      sortedTimeline.push(pair.memory);
-      sortedTimeline.push(pair.prompt);
+
+    type TimelineGroup = { kind: "pair"; memory: any; prompt: any } | { kind: "item"; item: any };
+
+    const groups: TimelineGroup[] = [
+      ...completePairs.map((p) => ({ kind: "pair" as const, memory: p.memory, prompt: p.prompt })),
+      ...standalone.map((item) => ({ kind: "item" as const, item })),
+    ];
+
+    groups.sort((a, b) => {
+      const pinA = a.kind === "pair" ? Number(!!a.memory.isPinned) : Number(!!a.item.isPinned);
+      const pinB = b.kind === "pair" ? Number(!!b.memory.isPinned) : Number(!!b.item.isPinned);
+      if (pinA !== pinB) return pinB - pinA;
+      const timeA = a.kind === "pair" ? a.memory.createdAt : a.item.createdAt;
+      const timeB = b.kind === "pair" ? b.memory.createdAt : b.item.createdAt;
+      return timeB - timeA;
+    });
+
+    for (const group of groups) {
+      if (group.kind === "pair") {
+        sortedTimeline.push(group.memory);
+        sortedTimeline.push(group.prompt);
+      } else {
+        sortedTimeline.push(group.item);
+      }
     }
-    standalone.sort((a, b) => b.createdAt - a.createdAt);
-    sortedTimeline.push(...standalone);
     timeline = sortedTimeline;
 
     const total = timeline.length;
@@ -539,7 +597,7 @@ type SearchResultItem = FormattedPrompt | FormattedMemory;
 
 export async function handleSearch(
   query: string,
-  tag?: string,
+  tag?: string | string[],
   page: number = 1,
   pageSize: number = 20
 ): Promise<ApiResponse<PaginatedResponse<SearchResultItem>>> {
@@ -550,24 +608,38 @@ export async function handleSearch(
     const queryVector = await embeddingService.embedWithTimeout(query, { task: "query" });
     const memoryResults: any[] = [];
     let promptResults: any[] = [];
-    if (tag) {
-      const { scope, hash } = extractScopeFromTag(tag);
-      const shards = await tursoShardManager.getAllShards(scope, hash);
-      for (const shard of shards) {
-        try {
-          const results = await tursoVectorSearch.searchInShard(
-            shard,
-            queryVector,
-            tag,
-            pageSize * 2
-          );
-          memoryResults.push(...results);
-        } catch (error) {
-          log("Shard search error", { shardId: shard.id, error: String(error) });
+    const filterTags = (Array.isArray(tag) ? tag : tag ? [tag] : [])
+      .map((t) => t.trim())
+      .filter(Boolean);
+    if (filterTags.length > 0) {
+      const seenMemoryKeys = new Set<string>();
+      const promptById = new Map<string, any>();
+      for (const filterTag of filterTags) {
+        const { scope, hash } = extractScopeFromTag(filterTag);
+        const shards = await tursoShardManager.getAllShards(scope, hash);
+        for (const shard of shards) {
+          try {
+            const results = await tursoVectorSearch.searchInShard(
+              shard,
+              queryVector,
+              filterTag,
+              pageSize * 2
+            );
+            for (const result of results) {
+              const key = String(result.id ?? `${result.memory}:${result.similarity}`);
+              if (seenMemoryKeys.has(key)) continue;
+              seenMemoryKeys.add(key);
+              memoryResults.push(result);
+            }
+          } catch (error) {
+            log("Shard search error", { shardId: shard.id, error: String(error) });
+          }
         }
+        const projectPath = await getProjectPathFromTag(filterTag);
+        const prompts = await userPromptManager.searchPrompts(query, projectPath, pageSize * 2);
+        for (const prompt of prompts) promptById.set(prompt.id, prompt);
       }
-      const projectPath = await getProjectPathFromTag(tag);
-      promptResults = await userPromptManager.searchPrompts(query, projectPath, pageSize * 2);
+      promptResults = [...promptById.values()];
     } else {
       const allShards = await getAllMemoryShards();
       const uniqueTags = new Set<string>();
@@ -932,7 +1004,7 @@ export async function handleGetUserProfile(userId?: string): Promise<ApiResponse
         createdAt: safeToISOString(profile.createdAt),
         lastAnalyzedAt: safeToISOString(profile.lastAnalyzedAt),
         totalPromptsAnalyzed: profile.totalPromptsAnalyzed,
-        profileData,
+        profileData: toPublicProfileData(profileData),
       },
     };
   } catch (error) {
@@ -970,7 +1042,7 @@ export async function handleGetProfileSnapshot(changelogId: string): Promise<Api
     const { userProfileManager } = await import("./user-profile/user-profile-manager.js");
     const changelog = await userProfileManager.getChangelogById(changelogId);
     if (!changelog) return { success: false, error: "Changelog not found" };
-    const profileData = JSON.parse(changelog.profileDataSnapshot);
+    const profileData = toPublicProfileData(JSON.parse(changelog.profileDataSnapshot));
     return {
       success: true,
       data: {
@@ -1091,8 +1163,10 @@ export async function handleAICleanup(
     return {
       success: true,
       data: {
-        old: profileData,
-        new: result.cleaned,
+        // Strip embeddings only on the HTTP response; pendingCleanups keeps
+        // full vectors for apply/merge.
+        old: toPublicProfileData(profileData),
+        new: toPublicProfileData(result.cleaned),
         changes: result.diff,
       },
     };
@@ -1427,6 +1501,8 @@ export async function handleDetectTagMigration(): Promise<
 
 interface MigrationProgress {
   processed: number;
+  /** Next index in the memory list to attempt; advances even when tagging fails. */
+  cursor: number;
   total: number;
   currentBatch: number;
   totalBatches: number;
@@ -1436,6 +1512,7 @@ interface MigrationProgress {
 
 const migrationProgress: MigrationProgress = {
   processed: 0,
+  cursor: 0,
   total: 0,
   currentBatch: 0,
   totalBatches: 0,
@@ -1449,7 +1526,7 @@ export async function handleGetTagMigrationProgress(): Promise<ApiResponse<Migra
 
 export async function handleRunTagMigrationBatch(
   batchSize: number = 5
-): Promise<ApiResponse<{ processed: number; total: number; hasMore: boolean }>> {
+): Promise<ApiResponse<{ processed: number; total: number; hasMore: boolean; errors: number }>> {
   try {
     await ensureTursoReady();
     const { AIProviderFactory } = await import("./ai/ai-provider-factory.js");
@@ -1471,13 +1548,19 @@ export async function handleRunTagMigrationBatch(
       }
     }
 
-    if (migrationProgress.total === 0) {
+    // Fresh run (or retry after a completed pass): reset counters so soft
+    // failures from a prior attempt can be retried instead of being skipped.
+    if (migrationProgress.total === 0 || migrationProgress.isComplete) {
+      migrationProgress.processed = 0;
+      migrationProgress.cursor = 0;
       migrationProgress.total = allMemories.length;
       migrationProgress.totalBatches = Math.ceil(allMemories.length / batchSize);
+      migrationProgress.currentBatch = 0;
       migrationProgress.isComplete = false;
+      migrationProgress.errors = [];
     }
 
-    const startIdx = migrationProgress.processed;
+    const startIdx = migrationProgress.cursor;
     const endIdx = Math.min(startIdx + batchSize, allMemories.length);
 
     for (let i = startIdx; i < endIdx; i++) {
@@ -1494,8 +1577,21 @@ export async function handleRunTagMigrationBatch(
               .filter((t: string) => t)
           : [];
 
+        // A memory that already has tags and a tags vector is fully migrated:
+        // re-embedding it produces the same vector and changes nothing. This
+        // endpoint walks the whole list one window at a time, and the normal
+        // case is a handful of untagged memories among hundreds that are done,
+        // so skipping the finished ones is the difference between a few
+        // seconds and re-vectorizing every memory on every run. Memories with
+        // tags but no tags vector are still processed so the missing vector is
+        // rebuilt.
+        if (currentTags.length > 0 && m.tags_vector != null) {
+          migrationProgress.processed++;
+          continue;
+        }
+
         if (currentTags.length === 0) {
-          const prompt = `Generate 2-4 short technical tags for this memory content:\n\n${m.content}\n\nReturn ONLY a comma-separated list of tags.`;
+          const prompt = `Generate 2-4 short technical tags for this memory content. Call the save_tags tool with a "tags" array.\n\n${m.content}`;
           const result = await provider.executeToolCall(
             "You are a technical tagger.",
             prompt,
@@ -1519,6 +1615,15 @@ export async function handleRunTagMigrationBatch(
               currentTags.join(","),
               m.id,
             ]);
+          } else {
+            // Soft failure (e.g. empty tool-call args): do not mark processed.
+            // Cursor still advances below so the batch window moves forward.
+            const errorMsg = `Tag generation failed for memory ${m.id}: ${
+              result.error ?? "no tags returned"
+            }`;
+            migrationProgress.errors.push(errorMsg);
+            log("Migration error for memory", { id: m.id, error: errorMsg });
+            continue;
           }
         }
 
@@ -1538,8 +1643,9 @@ export async function handleRunTagMigrationBatch(
       }
     }
 
+    migrationProgress.cursor = endIdx;
     migrationProgress.currentBatch++;
-    const hasMore = migrationProgress.processed < migrationProgress.total;
+    const hasMore = migrationProgress.cursor < allMemories.length;
 
     if (!hasMore) {
       migrationProgress.isComplete = true;
@@ -1547,7 +1653,12 @@ export async function handleRunTagMigrationBatch(
 
     return {
       success: true,
-      data: { processed: migrationProgress.processed, total: migrationProgress.total, hasMore },
+      data: {
+        processed: migrationProgress.processed,
+        total: migrationProgress.total,
+        hasMore,
+        errors: migrationProgress.errors.length,
+      },
     };
   } catch (error) {
     return { success: false, error: String(error) };

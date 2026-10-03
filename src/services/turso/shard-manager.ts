@@ -1,13 +1,18 @@
 import { join, basename, resolve, relative } from "node:path";
-import { existsSync, renameSync, unlinkSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import { CONFIG } from "../../config.js";
 import { assertSafeScopeHash } from "../memory-scope.js";
 import { tursoConnectionManager } from "./connection-manager.js";
 import { log } from "../logger.js";
 import { assertNoTursoMigrationInProgress } from "./operation-lock.js";
-import { withSqliteFileLockRetry } from "./sqlite-handle-release.js";
+import { withSqliteFileLockRetry, renameSqliteDatabase } from "./sqlite-handle-release.js";
 import type { ShardInfo } from "./types.js";
 import type { TursoDb } from "./turso-db.js";
+import {
+  applySchemaMigrations,
+  METADATA_DB_MIGRATIONS,
+  memoryShardMigrations,
+} from "./schema-migrations.js";
 
 const METADATA_DB_NAME = "metadata.db";
 
@@ -63,19 +68,26 @@ export class TursoShardManager {
   }
 
   private async ensureInitialized(): Promise<TursoDb> {
-    if (this.metadataDb && this.initPromise) {
-      await this.initPromise;
-      return this.metadataDb;
-    }
+    this.metadataPath = join(CONFIG.storagePath, METADATA_DB_NAME);
 
     if (this.initPromise) {
       await this.initPromise;
-      if (this.metadataDb) return this.metadataDb;
+    }
+
+    // Connection manager is authoritative: migrators may close/replace metadata.db
+    // underneath a cached TursoDb handle (encryption/engine rewrite).
+    if (this.metadataDb) {
+      const current = await tursoConnectionManager.getConnection(this.metadataPath);
+      if (current === this.metadataDb) {
+        return this.metadataDb;
+      }
+      this.metadataDb = current;
+      await this.initMetadataDb(this.metadataDb);
+      return this.metadataDb;
     }
 
     this.initPromise = (async () => {
       try {
-        this.metadataPath = join(CONFIG.storagePath, METADATA_DB_NAME);
         this.metadataDb = await tursoConnectionManager.getConnection(this.metadataPath);
         await this.initMetadataDb(this.metadataDb);
       } catch (error) {
@@ -90,29 +102,10 @@ export class TursoShardManager {
   }
 
   private async initMetadataDb(db: TursoDb): Promise<void> {
-    await db.batch([
-      {
-        sql: `
-          CREATE TABLE IF NOT EXISTS shards (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            scope TEXT NOT NULL,
-            scope_hash TEXT NOT NULL,
-            shard_index INTEGER NOT NULL,
-            db_path TEXT NOT NULL,
-            vector_count INTEGER DEFAULT 0,
-            is_active INTEGER DEFAULT 1,
-            created_at INTEGER NOT NULL,
-            UNIQUE(scope, scope_hash, shard_index)
-          )
-        `,
-      },
-      {
-        sql: `
-          CREATE INDEX IF NOT EXISTS idx_active_shards
-          ON shards(scope, scope_hash, is_active)
-        `,
-      },
-    ]);
+    await applySchemaMigrations(db, METADATA_DB_MIGRATIONS, {
+      dbPath: this.metadataPath,
+      label: "metadata.db",
+    });
   }
 
   getShardPath(scope: "user" | "project", scopeHash: string, shardIndex: number): string {
@@ -267,15 +260,11 @@ export class TursoShardManager {
   ): Promise<void> {
     const dims = getValidatedEmbeddingDimensions(dimensions);
 
+    await applySchemaMigrations(db, memoryShardMigrations(dims), {
+      label: "memory-shard",
+    });
+
     await db.batch([
-      {
-        sql: `
-          CREATE TABLE IF NOT EXISTS shard_metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-          )
-        `,
-      },
       {
         sql: `
           INSERT OR REPLACE INTO shard_metadata (key, value)
@@ -289,64 +278,6 @@ export class TursoShardManager {
           VALUES ('embedding_model', ?)
         `,
         args: [embeddingModel],
-      },
-      {
-        sql: `
-          CREATE TABLE IF NOT EXISTS memories (
-            id TEXT PRIMARY KEY,
-            content TEXT NOT NULL,
-            vector F32_BLOB(${dims}) NOT NULL,
-            tags_vector F32_BLOB(${dims}),
-            container_tag TEXT NOT NULL,
-            tags TEXT,
-            type TEXT,
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL,
-            metadata TEXT,
-            display_name TEXT,
-            user_name TEXT,
-            user_email TEXT,
-            project_path TEXT,
-            project_name TEXT,
-            git_repo_url TEXT,
-            is_pinned INTEGER DEFAULT 0
-          )
-        `,
-      },
-      {
-        sql: `CREATE INDEX IF NOT EXISTS idx_container_tag ON memories(container_tag)`,
-      },
-      {
-        sql: `CREATE INDEX IF NOT EXISTS idx_type ON memories(type)`,
-      },
-      {
-        sql: `CREATE INDEX IF NOT EXISTS idx_created_at ON memories(created_at DESC)`,
-      },
-      {
-        sql: `CREATE INDEX IF NOT EXISTS idx_is_pinned ON memories(is_pinned)`,
-      },
-      {
-        sql: `
-          CREATE INDEX IF NOT EXISTS memories_vec_idx
-          ON memories (libsql_vector_idx(
-            vector,
-            'metric=cosine',
-            'compress_neighbors=float8',
-            'max_neighbors=20'
-          ))
-        `,
-      },
-      {
-        sql: `
-          CREATE INDEX IF NOT EXISTS memories_tags_vec_idx
-          ON memories (libsql_vector_idx(
-            tags_vector,
-            'metric=cosine',
-            'compress_neighbors=float8',
-            'max_neighbors=20'
-          ))
-          WHERE tags_vector IS NOT NULL
-        `,
       },
     ]);
   }
@@ -556,13 +487,13 @@ export class TursoShardManager {
     }
 
     if (existsSync(fullPath)) {
-      await withSqliteFileLockRetry(() => renameSync(fullPath, archivePath));
+      await withSqliteFileLockRetry(() => renameSqliteDatabase(fullPath, archivePath));
     }
     try {
       await metadataDb.run(`DELETE FROM shards WHERE id = ?`, [shardId]);
     } catch (error) {
       if (existsSync(archivePath) && !existsSync(fullPath)) {
-        await withSqliteFileLockRetry(() => renameSync(archivePath, fullPath));
+        await withSqliteFileLockRetry(() => renameSqliteDatabase(archivePath, fullPath));
       }
       throw error;
     }

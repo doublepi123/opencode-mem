@@ -6,11 +6,12 @@
  * `overrides` at the install root, so `@huggingface/transformers` would otherwise
  * keep nested `onnxruntime-node@1.24.3` (no darwin/x64 binding). See #184 / #158 / #210.
  *
- * We pin onnxruntime-node@1.20.1:
+ * We pin onnxruntime-node@1.30.0:
  * - 1.21.0–1.23.2 crash during macOS Ort::Env process-exit teardown (#225 /
  *   microsoft/onnxruntime#24579); the fix shipped in 1.24.1
- * - fixed releases still lack darwin/x64 binaries (microsoft/onnxruntime#27961)
- * - OpenCode's embedded Bun 1.3.14 surfaces the teardown failure as SIGILL
+ * - fixed releases still lack darwin/x64 binaries (microsoft/onnxruntime#27961);
+ *   Intel Mac (darwin/x64) is unsupported for local embeddings
+ * - Aligns with @huggingface/transformers' declared onnxruntime-node dependency
  *
  * Transformers must be loaded via its CJS export so this Module._resolveFilename
  * shim applies; the ESM entry's static `import "onnxruntime-node"` bypasses it.
@@ -22,7 +23,7 @@ import { createRuntimeRequire } from "./runtime-require.js";
 
 const PACKAGE_NAME = "onnxruntime-node";
 const COMMON_PACKAGE = "onnxruntime-common";
-const PINNED_VERSION_HINT = "1.20.1";
+const PINNED_VERSION_HINT = "1.30.0";
 const requireFromHere = createRuntimeRequire(import.meta);
 
 let shimInstalled = false;
@@ -113,7 +114,7 @@ export function formatMissingOnnxruntimeBindingError(
   const bindingPath = getOnnxruntimeBindingPath(platform, arch);
   const intelHint =
     platform === "darwin" && arch === "x64"
-      ? ` On Intel Mac (darwin/x64), onnxruntime-node@1.21.0–1.23.2 can crash Bun 1.3.14 on process exit (#225), while fixed releases still lack an x64 binding; opencode-mem pins ${PINNED_VERSION_HINT}. If this persists after updating, clear OpenCode's plugin cache (~/.cache/opencode/packages/opencode-mem@*) and reinstall, or configure remote embeddings via embeddingApiUrl + embeddingApiKey.`
+      ? ` Intel Mac (darwin/x64) is unsupported for local embeddings: onnxruntime-node@${PINNED_VERSION_HINT} ships no x64 binding (microsoft/onnxruntime#27961). Configure remote embeddings via embeddingApiUrl + embeddingApiKey, or use Apple Silicon, Linux, or Windows.`
       : ` Configure remote embeddings via embeddingApiUrl + embeddingApiKey, or reinstall the plugin so onnxruntime-node@${PINNED_VERSION_HINT} is used.`;
   return `Local embedding native binding missing for ${platform}/${arch} at ${bindingPath}.${intelHint}`;
 }
@@ -148,7 +149,7 @@ export function formatOnnxruntimeInitError(
 
   const intelHint =
     platform === "darwin" && arch === "x64"
-      ? ` On Intel Mac nested installs, @huggingface/transformers may resolve onnxruntime-node@1.24+ (no x64 binding); opencode-mem pins ${PINNED_VERSION_HINT} via a CJS resolve shim.`
+      ? ` Intel Mac (darwin/x64) is unsupported for local embeddings; opencode-mem pins ${PINNED_VERSION_HINT} (no x64 binding).`
       : "";
 
   return new Error(

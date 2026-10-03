@@ -2,12 +2,41 @@
 <html lang="en" class="dark">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="alternate icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" href="/opencode-mem-icon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>OpenCode Memory Explorer</title>
+    <!-- Block paint flash before Vite CSS/JS modules load -->
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #0a0a0a;
+        color: #d4d4d4;
+        color-scheme: dark;
+      }
+      html:not(.dark),
+      html:not(.dark) body {
+        background: #f5f4f8;
+        color: #1b1a1f;
+        color-scheme: light;
+      }
+    </style>
+    <script>
+      (function () {
+        try {
+          var theme = localStorage.getItem("opencode-mem-theme");
+          if (theme === "light") document.documentElement.classList.remove("dark");
+          else document.documentElement.classList.add("dark");
+        } catch (_) {
+          document.documentElement.classList.add("dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="app"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

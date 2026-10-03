@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   applyStructuredOutputAgentConfig,
+  applyStructuredOutputChatParams,
   configureOpencodeHostTransport,
   INTERNAL_CAPTURE_SESSION_TITLE,
   isInternalCaptureSessionTitle,
@@ -16,6 +17,7 @@ import {
   resetHostFetch,
   setHostFetch,
   STRUCTURED_OUTPUT_AGENT,
+  STRUCTURED_OUTPUT_MAX_STEPS,
   STRUCTURED_OUTPUT_TOOLS,
 } from "../src/services/ai/opencode-provider.js";
 import { z } from "zod";
@@ -181,13 +183,52 @@ describe("structured-output agent config (issue #189)", () => {
     expect(cfg.agent?.[STRUCTURED_OUTPUT_AGENT]).toEqual({
       description: "Internal least-privilege agent for opencode-mem structured output",
       mode: "subagent",
-      steps: 2,
-      maxSteps: 2,
+      steps: STRUCTURED_OUTPUT_MAX_STEPS,
+      maxSteps: STRUCTURED_OUTPUT_MAX_STEPS,
       tools: STRUCTURED_OUTPUT_TOOLS,
       permission: {
         "*": "deny",
         StructuredOutput: "allow",
       },
+      options: {
+        thinking: { type: "disabled" },
+      },
     });
+  });
+});
+
+describe("structured-output chat.params thinking disable (issue #253)", () => {
+  it("forces thinking disabled after variant merge for the structured agent", () => {
+    const output = {
+      options: {
+        reasoningEffort: "high",
+        thinking: { type: "enabled" },
+      },
+    };
+
+    applyStructuredOutputChatParams({ agent: STRUCTURED_OUTPUT_AGENT }, output);
+
+    expect(output.options).toEqual({
+      reasoningEffort: "high",
+      thinking: { type: "disabled" },
+    });
+  });
+
+  it("does not mutate options for ordinary agents", () => {
+    const output = {
+      options: {
+        reasoningEffort: "high",
+      },
+    };
+
+    applyStructuredOutputChatParams({ agent: "build" }, output);
+
+    expect(output.options).toEqual({ reasoningEffort: "high" });
+  });
+
+  it("ignores missing output", () => {
+    expect(() =>
+      applyStructuredOutputChatParams({ agent: STRUCTURED_OUTPUT_AGENT }, undefined)
+    ).not.toThrow();
   });
 });

@@ -505,7 +505,8 @@ export class WebServer {
       }
 
       if (path === "/api/memories" && method === "GET") {
-        const tag = url.searchParams.get("tag") || undefined;
+        const tags = url.searchParams.getAll("tag").filter(Boolean);
+        const tag = tags.length === 0 ? undefined : tags.length === 1 ? tags[0] : tags;
         const page = parseInt(url.searchParams.get("page") || "1");
         const pageSize = parseInt(url.searchParams.get("pageSize") || "20");
         const includePrompts = url.searchParams.get("includePrompts") !== "false";
@@ -549,7 +550,8 @@ export class WebServer {
 
       if (path === "/api/search" && method === "GET") {
         const query = url.searchParams.get("q");
-        const tag = url.searchParams.get("tag") || undefined;
+        const tags = url.searchParams.getAll("tag").filter(Boolean);
+        const tag = tags.length === 0 ? undefined : tags.length === 1 ? tags[0] : tags;
         const page = parseInt(url.searchParams.get("page") || "1");
         const pageSize = parseInt(url.searchParams.get("pageSize") || "20");
 

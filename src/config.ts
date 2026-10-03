@@ -45,11 +45,18 @@ interface OpenCodeMemConfig {
   autoCaptureMaxRetries?: number;
   autoCaptureMaxContextBytes?: number;
   autoCaptureLanguage?: string;
-  memoryProvider?: "openai-chat" | "openai-responses" | "anthropic" | "minimax" | "orcarouter";
+  memoryProvider?:
+    "atlas-cloud" | "openai-chat" | "openai-responses" | "anthropic" | "minimax" | "orcarouter";
   memoryModel?: string;
   memoryApiUrl?: string;
   memoryApiKey?: string;
   memoryTemperature?: number | false;
+  /**
+   * Force chat-completion providers to send `tool_choice: "required"`.
+   * Defaults to true when unset. Set to false for models that reject forced
+   * tool choice (e.g. some thinking/reasoning modes).
+   */
+  forceToolChoice?: boolean;
   memoryExtraParams?: Record<string, unknown>;
   opencodeProvider?: string;
   opencodeModel?: string;
@@ -89,6 +96,26 @@ interface OpenCodeMemConfig {
   showAutoCaptureToasts?: boolean;
   showUserProfileToasts?: boolean;
   showErrorToasts?: boolean;
+  /**
+   * Hex encryption key for local DB at rest (32 or 64 hex chars), or a secret
+   * ref (`env://`, `file://`). Prefer file:// / env:// — never commit keys.
+   * When `databaseEncryptionEnabled` is true and this is unset, the plugin
+   * auto-creates `~/.config/opencode/opencode-mem-db.key` (chmod 600).
+   */
+  databaseEncryptionKey?: string;
+  /** Opt-in local DB encryption at rest (AES-256-GCM by default). */
+  databaseEncryptionEnabled?: boolean;
+  /** Cipher for @tursodatabase/database encryption (default aes256gcm). */
+  databaseEncryptionCipher?:
+    | "aes128gcm"
+    | "aes256gcm"
+    | "aegis256"
+    | "aegis256x2"
+    | "aegis128l"
+    | "aegis128x2"
+    | "aegis128x4";
+  /** Automatically clear OpenCode's cached plugin install when a newer npm latest is available. */
+  autoUpdate?: boolean;
   compaction?: {
     enabled?: boolean;
     memoryLimit?: number;
@@ -114,6 +141,7 @@ const DEFAULTS: Required<
     | "memoryApiKey"
     | "memoryProvider"
     | "memoryTemperature"
+    | "forceToolChoice"
     | "memoryExtraParams"
     | "opencodeProvider"
     | "opencodeModel"
@@ -123,6 +151,7 @@ const DEFAULTS: Required<
     | "webServerAuthPassword"
     | "webServerAuthUsername"
     | "webServerApiToken"
+    | "databaseEncryptionKey"
   >
 > & {
   embeddingApiUrl?: string;
@@ -130,8 +159,10 @@ const DEFAULTS: Required<
   memoryModel?: string;
   memoryApiUrl?: string;
   memoryApiKey?: string;
-  memoryProvider?: "openai-chat" | "openai-responses" | "anthropic" | "minimax" | "orcarouter";
+  memoryProvider?:
+    "atlas-cloud" | "openai-chat" | "openai-responses" | "anthropic" | "minimax" | "orcarouter";
   memoryTemperature?: number | false;
+  forceToolChoice?: boolean;
   memoryExtraParams?: Record<string, unknown>;
   opencodeProvider?: string;
   opencodeModel?: string;
@@ -141,6 +172,7 @@ const DEFAULTS: Required<
   webServerAuthPassword?: string;
   webServerAuthUsername?: string;
   webServerApiToken?: string;
+  databaseEncryptionKey?: string;
   memory?: {
     defaultScope?: "project" | "all-projects";
   };
@@ -192,6 +224,9 @@ const DEFAULTS: Required<
   showAutoCaptureToasts: true,
   showUserProfileToasts: true,
   showErrorToasts: true,
+  databaseEncryptionEnabled: false,
+  databaseEncryptionCipher: "aes256gcm",
+  autoUpdate: true,
   memory: {
     defaultScope: "project",
   },
@@ -377,7 +412,7 @@ const CONFIG_TEMPLATE = `{
   
   "autoCaptureEnabled": true,
   
-  // Provider type: "openai-chat" | "openai-responses" | "anthropic" | "minimax" | "orcarouter"
+  // Provider type: "atlas-cloud" | "openai-chat" | "openai-responses" | "anthropic" | "minimax" | "orcarouter"
   // Note: "openai-chat" is a generic OpenAI API-compatible mode.
   // Any service that follows the OpenAI Chat Completions API can use it via custom "memoryApiUrl".
   "memoryProvider": "openai-chat",
@@ -423,10 +458,12 @@ const CONFIG_TEMPLATE = `{
 
   // MiniMax (Anthropic Messages-compatible endpoint, with session support):
   //   "memoryProvider": "minimax"
-  //   "memoryModel": "MiniMax-M3"
+  //   "memoryModel": "MiniMax-M3"                  // 1,000,000-token context
+  //   // Alternative: "MiniMax-M2.7"                // 204,800-token context; thinking always on
   //   "memoryApiUrl": "https://api.minimax.io"        // global endpoint
   //   "memoryApiKey": "<MiniMax API key>"
   //   // China endpoint: "memoryApiUrl": "https://api.minimaxi.com"
+  //   // MiniMax-M3 supports adaptive or disabled thinking; MiniMax-M2.7 thinking is always on.
   //   // Optional adaptive thinking for MiniMax-M3:
   //   "memoryExtraParams": { "thinking": { "type": "adaptive" } }
 
@@ -438,6 +475,15 @@ const CONFIG_TEMPLATE = `{
   //   // OrcaRouter rejects bare model names, so if you set memoryModel, use a
   //   // namespaced ID such as "openai/gpt-5.5" or "deepseek/deepseek-v4-flash".
   //   "memoryModel": "openai/gpt-5.5"
+
+  // Atlas Cloud (OpenAI-compatible Chat Completions preset, with session support):
+  //   "memoryProvider": "atlas-cloud"
+  //   "memoryApiKey": "env://ATLASCLOUD_API_KEY"
+  //   // memoryApiUrl and memoryModel are optional — they default to
+  //   // https://api.atlascloud.ai/v1 and "deepseek-ai/deepseek-v4-pro".
+  //   // When selected, auto-capture/profile prompts, responses, and relevant
+  //   // conversation context are sent to api.atlascloud.ai.
+  //   // "memoryModel": "deepseek-ai/deepseek-v4-pro"
 
   // Groq (OpenAI-compatible, use openai-chat provider):
   //   "memoryProvider": "openai-chat"
@@ -467,13 +513,17 @@ const CONFIG_TEMPLATE = `{
   // Set to false and add "memoryTemperature": false in config when using such models
   "memoryTemperature": 0.3,
 
+  // Force tool calls on openai-chat / orcarouter / atlas-cloud (tool_choice: "required"). Default true.
+  // Some thinking/reasoning models reject forced tool choice — set false to fall back to "auto":
+  // "forceToolChoice": false,
+
   // Extra parameters to include in API request body
   // Useful for local inference servers (e.g. llama-server with --jinja) that support
   // additional parameters like disabling thinking/reasoning mode
   // Example for Qwen3 models: { "enable_thinking": false }
   // "memoryExtraParams": {},
 
-  // Language for auto-capture summaries (default: "auto" for auto-detection)
+  // Language for auto-capture summaries and user profile learning (default: "auto" for auto-detection)
   // Options: "auto", "en", "id", "zh", "ja", "es", "fr", "de", "ru", "pt", "ar", "ko"
   // "autoCaptureLanguage": "auto",
 
@@ -489,6 +539,17 @@ const CONFIG_TEMPLATE = `{
 
   // Show toast for error messages
   "showErrorToasts": true,
+
+  // Opt-in encryption at rest for local Turso DB shards (AES-256-GCM).
+  // When enabled without a key, the plugin creates
+  // ~/.config/opencode/opencode-mem-db.key (chmod 600) once.
+  // "databaseEncryptionEnabled": true,
+  // Optional override: "databaseEncryptionKey": "env://OPENCODE_MEM_DB_KEY",
+  // "databaseEncryptionCipher": "aes256gcm",
+
+  // Automatically update when installed as opencode-mem@latest (or a range).
+  // Pinned versions like opencode-mem@2.26.0 are never auto-updated.
+  "autoUpdate": true,
 
   // ============================================
   // User Profile System
@@ -678,7 +739,11 @@ export function normalizeInjectionMarkers(value: string[] | undefined): string[]
 }
 
 function buildConfig(fileConfig: OpenCodeMemConfig) {
-  const memoryApiKey = resolveSecretValue(fileConfig.memoryApiKey);
+  const memoryProvider = (fileConfig.memoryProvider ?? "openai-chat") as
+    "atlas-cloud" | "openai-chat" | "openai-responses" | "anthropic" | "minimax" | "orcarouter";
+  const memoryApiKey =
+    resolveSecretValue(fileConfig.memoryApiKey) ??
+    (memoryProvider === "atlas-cloud" ? process.env.ATLASCLOUD_API_KEY : undefined);
   const embeddingDimensions =
     fileConfig.embeddingDimensions ??
     getEmbeddingDimensions(fileConfig.embeddingModel ?? DEFAULTS.embeddingModel);
@@ -726,18 +791,19 @@ function buildConfig(fileConfig: OpenCodeMemConfig) {
     autoCaptureMaxRetries: fileConfig.autoCaptureMaxRetries ?? DEFAULTS.autoCaptureMaxRetries,
     autoCaptureMaxContextBytes,
     autoCaptureLanguage: fileConfig.autoCaptureLanguage,
-    memoryProvider: (fileConfig.memoryProvider ?? "openai-chat") as
-      "openai-chat" | "openai-responses" | "anthropic" | "minimax" | "orcarouter",
+    memoryProvider,
     memoryModel: fileConfig.memoryModel,
     memoryApiUrl: fileConfig.memoryApiUrl,
     memoryApiKey,
     memoryTemperature: fileConfig.memoryTemperature,
+    forceToolChoice: fileConfig.forceToolChoice,
     memoryExtraParams: fileConfig.memoryExtraParams,
     opencodeProvider: fileConfig.opencodeProvider,
     opencodeModel: fileConfig.opencodeModel,
     autoCaptureProviderStatus: getAutoCaptureProviderStatus({
       opencodeProvider: fileConfig.opencodeProvider,
       opencodeModel: fileConfig.opencodeModel,
+      memoryProvider,
       memoryModel: fileConfig.memoryModel,
       memoryApiUrl: fileConfig.memoryApiUrl,
       memoryApiKey,
@@ -807,6 +873,13 @@ function buildConfig(fileConfig: OpenCodeMemConfig) {
     showAutoCaptureToasts: fileConfig.showAutoCaptureToasts ?? DEFAULTS.showAutoCaptureToasts,
     showUserProfileToasts: fileConfig.showUserProfileToasts ?? DEFAULTS.showUserProfileToasts,
     showErrorToasts: fileConfig.showErrorToasts ?? DEFAULTS.showErrorToasts,
+    databaseEncryptionEnabled:
+      fileConfig.databaseEncryptionEnabled ?? DEFAULTS.databaseEncryptionEnabled,
+    // Keep raw ref (env:// / file:// / hex); resolved lazily with optional auto-create.
+    databaseEncryptionKey: fileConfig.databaseEncryptionKey,
+    databaseEncryptionCipher:
+      fileConfig.databaseEncryptionCipher ?? DEFAULTS.databaseEncryptionCipher,
+    autoUpdate: fileConfig.autoUpdate ?? DEFAULTS.autoUpdate,
     memory: {
       defaultScope: fileConfig.memory?.defaultScope ?? DEFAULTS.memory.defaultScope,
     },
@@ -870,9 +943,9 @@ export function getAutoCaptureProviderStatus(
   const hasMemoryApiKey = hasValue(config.memoryApiKey);
   const hasPlaceholderMemoryApiKey = isPlaceholderApiKey(config.memoryApiKey);
 
-  // The orcarouter provider presets its endpoint and default model, so only
-  // an API key is required for the manual fallback path.
-  if (config.memoryProvider === "orcarouter") {
+  // Preset providers fill endpoint/model themselves, so only an API key is
+  // required for the manual fallback path.
+  if (config.memoryProvider === "orcarouter" || config.memoryProvider === "atlas-cloud") {
     if (!hasMemoryApiKey) issues.push("memoryApiKey is not configured");
     if (hasPlaceholderMemoryApiKey) issues.push("memoryApiKey contains a placeholder value");
     if (hasMemoryApiKey && !hasPlaceholderMemoryApiKey) {

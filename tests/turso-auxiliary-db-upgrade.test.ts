@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { cleanupTursoTestDirectory } from "./turso-test-utils.js";
-import { createClient } from "@libsql/client";
+import { connect } from "@tursodatabase/database";
 
 describe("turso auxiliary database upgrades", () => {
   let baseDir: string;
@@ -15,10 +15,8 @@ describe("turso auxiliary database upgrades", () => {
   it("preserves legacy prompts while adding newer columns", async () => {
     baseDir = mkdtempSync(join(tmpdir(), "turso-prompt-upgrade-"));
     const dbPath = join(baseDir, "user-prompts.db");
-    const legacy = createClient({ url: `file:${dbPath}` });
-    await legacy.batch(
-      [
-        `CREATE TABLE user_prompts (
+    const legacy = await connect(dbPath);
+    await legacy.exec(`CREATE TABLE user_prompts (
           id TEXT PRIMARY KEY,
           session_id TEXT NOT NULL,
           message_id TEXT NOT NULL,
@@ -28,25 +26,23 @@ describe("turso auxiliary database upgrades", () => {
           captured INTEGER DEFAULT 0,
           user_learning_captured BOOLEAN DEFAULT 0,
           linked_memory_id TEXT
-        )`,
-        {
-          sql: `INSERT INTO user_prompts (
+        )`);
+    await legacy
+      .prepare(
+        `INSERT INTO user_prompts (
             id, session_id, message_id, project_path, content, created_at, captured
-          ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-          args: [
-            "prompt_legacy",
-            "session_legacy",
-            "message_legacy",
-            "/legacy/project",
-            "preserve this prompt",
-            123,
-            1,
-          ],
-        },
-      ],
-      "write"
-    );
-    legacy.close();
+          ) VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        "prompt_legacy",
+        "session_legacy",
+        "message_legacy",
+        "/legacy/project",
+        "preserve this prompt",
+        123,
+        1
+      );
+    await legacy.close();
 
     const { CONFIG } = await import("../src/config.js");
     CONFIG.storagePath = baseDir;
@@ -60,12 +56,12 @@ describe("turso auxiliary database upgrades", () => {
     expect(prompt?.providerId).toBeNull();
     expect(prompt?.modelId).toBeNull();
 
-    const verify = createClient({ url: `file:${dbPath}` });
-    const columns = await verify.execute(`PRAGMA table_info(user_prompts)`);
-    const names = columns.rows.map((row) => String(row.name));
+    const verify = await connect(dbPath);
+    const columns = await verify.prepare(`PRAGMA table_info(user_prompts)`).all();
+    const names = columns.map((row) => String(row.name));
     expect(names).toContain("capture_attempts");
     expect(names).toContain("provider_id");
     expect(names).toContain("model_id");
-    verify.close();
+    await verify.close();
   });
 });

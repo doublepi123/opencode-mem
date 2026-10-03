@@ -1,12 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import {
-  copyFileSync,
-  existsSync,
-  mkdtempSync,
-  readdirSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { cleanupTursoTestDirectory } from "./turso-test-utils.js";
@@ -28,6 +21,8 @@ describe("turso re-embed migration safety", () => {
     const { CONFIG } = await import("../src/config.js");
     CONFIG.storagePath = baseDir;
     CONFIG.embeddingDimensions = 2;
+    CONFIG.databaseEncryptionEnabled = false;
+    CONFIG.databaseEncryptionKey = undefined;
 
     const { tursoShardManager } = await import("../src/services/turso/shard-manager.js");
     const { tursoConnectionManager } = await import("../src/services/turso/connection-manager.js");
@@ -158,8 +153,15 @@ describe("turso re-embed migration safety", () => {
     const stagedPath = `${shard.dbPath}.reembed-crash.tmp`;
     const backupPath = `${shard.dbPath}.pre-reembed-crash.bak`;
     const statePath = `${shard.dbPath}.reembed-swap.json`;
+    const { renameSqliteDatabase } = await import("../src/services/turso/sqlite-handle-release.js");
+    // Duplicate current DB as staged replacement, then move original to backup.
     copyFileSync(shard.dbPath, stagedPath);
-    renameSync(shard.dbPath, backupPath);
+    for (const suffix of ["-wal", "-shm"]) {
+      if (existsSync(`${shard.dbPath}${suffix}`)) {
+        copyFileSync(`${shard.dbPath}${suffix}`, `${stagedPath}${suffix}`);
+      }
+    }
+    renameSqliteDatabase(shard.dbPath, backupPath);
     writeFileSync(
       statePath,
       JSON.stringify({ dbPath: shard.dbPath, stagedPath, backupPath }),

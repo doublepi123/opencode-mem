@@ -2,9 +2,12 @@
 /**
  * OpenCode-shaped nested-install regression for #210.
  *
- * Installs the packed plugin into a temporary consumer without root overrides,
- * so @huggingface/transformers may keep nested onnxruntime-node@1.24.3.
- * Then verifies the production CJS prepare+load path pins the direct 1.20.1 stack.
+ * Installs the packed plugin into a temporary consumer without root overrides.
+ * When transformers and the direct pin declare different onnxruntime versions,
+ * npm may keep nested onnxruntime-node@1.24.3. When they align (both 1.30.0),
+ * npm dedupes — this fixture then plants a synthetic nested 1.24.3 under
+ * transformers so the CJS resolve shim (#184 / #210) is still exercised.
+ * Then verifies the production CJS prepare+load path pins the direct 1.30.0 stack.
  *
  * Unlike earlier revisions, Transformers is loaded through the production
  * `loadLocalTransformersBackend()` export (createRuntimeRequire + shim), not via
@@ -16,7 +19,8 @@
  *
  * npm may hoist dependencies to the consumer root (fixture/node_modules/...) while
  * OpenCode keeps them under the plugin package. Both layouts are accepted as long as
- * transformers can resolve a nested 1.24.x copy and the production shim pins 1.20.1.
+ * transformers can resolve a nested 1.24.x copy (real or synthetic) and the
+ * production shim pins 1.30.0.
  *
  * Usage (from a built repo checkout):
  *   node scripts/verify-nested-onnxruntime-fixture.mjs
@@ -32,12 +36,12 @@
 
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-const PINNED = "1.20.1";
+const PINNED = "1.30.0";
 const NESTED_BAD = "1.24.3";
 const runtime = typeof globalThis.Bun !== "undefined" ? "bun" : "node";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -110,6 +114,48 @@ function findTransformersPackageJson(searchRoots) {
     if (existsSync(candidate)) return candidate;
   }
   return null;
+}
+
+/**
+ * When pin and transformers agree on onnxruntime-node, npm dedupes and there is
+ * no nested copy. Plant a synthetic NESTED_BAD under transformers so the shim
+ * regression (#184 / #210) still runs against a conflicting nested layout.
+ */
+function ensureSyntheticNestedBad(searchRoots) {
+  const transformersPkg = findTransformersPackageJson(searchRoots);
+  if (!transformersPkg) fail("transformers package.json not found for synthetic nest");
+  const transformersRoot = dirname(transformersPkg);
+  const nestedNode = join(transformersRoot, "node_modules", "onnxruntime-node");
+  const nestedCommon = join(transformersRoot, "node_modules", "onnxruntime-common");
+
+  mkdirSync(join(nestedNode, "dist"), { recursive: true });
+  mkdirSync(join(nestedCommon, "dist", "cjs"), { recursive: true });
+  writeFileSync(
+    join(nestedNode, "package.json"),
+    JSON.stringify({
+      name: "onnxruntime-node",
+      version: NESTED_BAD,
+      main: "dist/index.js",
+    })
+  );
+  writeFileSync(join(nestedNode, "dist", "index.js"), `module.exports = { nested: true };\n`);
+  writeFileSync(
+    join(nestedCommon, "package.json"),
+    JSON.stringify({
+      name: "onnxruntime-common",
+      version: NESTED_BAD,
+      main: "dist/cjs/index.js",
+    })
+  );
+  writeFileSync(
+    join(nestedCommon, "dist", "cjs", "index.js"),
+    `module.exports = { nested: true };\n`
+  );
+  log(`planted synthetic nested onnxruntime-node@${NESTED_BAD} under transformers`);
+  return {
+    root: nestedNode,
+    pkg: JSON.parse(readFileSync(join(nestedNode, "package.json"), "utf8")),
+  };
 }
 
 async function verifyCompiledHost(pluginRoot) {
@@ -254,16 +300,22 @@ async function main() {
   }
   log(`direct onnxruntime-node@${directPkg.version} at ${directNodeEntry}`);
 
-  const nested = findNestedOnnxruntime(searchRoots);
+  let nested = findNestedOnnxruntime(searchRoots);
   if (nested) {
     log(`nested onnxruntime-node@${nested.pkg.version} present under transformers`);
-    if (nested.pkg.version !== NESTED_BAD && nested.pkg.version !== PINNED) {
+    if (nested.pkg.version === PINNED) {
+      log(
+        `nested version matches pin ${PINNED} (aligned deps / dedupe); planting synthetic ${NESTED_BAD}`
+      );
+      nested = ensureSyntheticNestedBad(searchRoots);
+    } else if (nested.pkg.version !== NESTED_BAD) {
       log(`warning: unexpected nested version ${nested.pkg.version}`);
     }
   } else {
-    fail(
-      "expected nested onnxruntime-node under @huggingface/transformers (OpenCode nested-install shape); package manager deduped unexpectedly"
+    log(
+      `no nested onnxruntime under transformers (aligned pin/transformers ${PINNED}); planting synthetic ${NESTED_BAD}`
     );
+    nested = ensureSyntheticNestedBad(searchRoots);
   }
 
   // Prove that a transformers-local require would prefer nested 1.24.x when present.
@@ -275,7 +327,7 @@ async function main() {
     const resolvedPkg = readPkgNear(nestedResolved).pkg;
     if (resolvedPkg.version === PINNED) {
       fail(
-        "expected transformers-local resolve to prefer nested 1.24.x before shim, but got pinned 1.20.1"
+        "expected transformers-local resolve to prefer nested 1.24.x before shim, but got pinned 1.30.0"
       );
     }
     log(`pre-shim transformers resolve -> ${nestedResolved} (@${resolvedPkg.version})`);
@@ -363,7 +415,7 @@ async function main() {
 
   await verifyCompiledHost(pluginRoot);
 
-  log("PASS — nested fixture loads production CJS path on onnxruntime 1.20.1 stack");
+  log("PASS — nested fixture loads production CJS path on onnxruntime 1.30.0 stack");
 
   if (cleanup && process.env.KEEP_FIXTURE !== "1") cleanup();
 }

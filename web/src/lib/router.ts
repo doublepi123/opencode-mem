@@ -1,4 +1,3 @@
-import { useSyncExternalStore } from "react";
 import {
   normalizePath,
   pathForView,
@@ -23,19 +22,27 @@ function setPath(next: string) {
   emit();
 }
 
-function subscribe(listener: () => void) {
+export function subscribePath(listener: () => void) {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
 }
 
-function getSnapshot() {
+export function getPath(): string {
   return currentPath;
 }
 
-function getServerSnapshot() {
-  return ROUTES.project;
+/** True when a click should be handled as in-app SPA navigation. */
+export function shouldHandleSpaClick(event: MouseEvent): boolean {
+  return !(
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  );
 }
 
 export function navigate(to: string, replace = false) {
@@ -54,7 +61,7 @@ export function navigateView(view: AppView, replace = false) {
 }
 
 export function currentView(): AppView {
-  return viewFromPath(window.location.pathname);
+  return viewFromPath(typeof window !== "undefined" ? window.location.pathname : currentPath);
 }
 
 /** Sync store with history; `/` and unknown paths resolve to project memories. */
@@ -71,14 +78,6 @@ export function initRouter(): () => void {
   sync();
   window.addEventListener("popstate", sync);
   return () => window.removeEventListener("popstate", sync);
-}
-
-export function usePath(): string {
-  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-}
-
-export function useAppView(): AppView {
-  return viewFromPath(usePath());
 }
 
 export { ROUTES, pathForView, viewFromPath };

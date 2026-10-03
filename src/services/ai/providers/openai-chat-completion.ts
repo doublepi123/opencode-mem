@@ -38,7 +38,7 @@ type RequestBody = {
   model: string;
   messages: APIMessage[];
   tools: ChatCompletionTool[];
-  tool_choice: "auto";
+  tool_choice: "auto" | "required";
   temperature?: number;
   [key: string]: unknown;
 };
@@ -103,7 +103,7 @@ export class OpenAIChatCompletionProvider extends BaseAIProvider {
   }
 
   getProviderName(): string {
-    return "openai-chat";
+    return this.sessionProviderTag();
   }
 
   supportsSession(): boolean {
@@ -264,7 +264,7 @@ export class OpenAIChatCompletionProvider extends BaseAIProvider {
           model: this.resolveModel(),
           messages,
           tools: [toolSchema],
-          tool_choice: "auto",
+          tool_choice: this.config.forceToolChoice === false ? "auto" : "required",
         };
 
         if (this.config.memoryTemperature !== false) {
@@ -311,6 +311,15 @@ export class OpenAIChatCompletionProvider extends BaseAIProvider {
           ) {
             errorMessage =
               'Your model does not support the temperature parameter. Add "memoryTemperature": false to your config file to disable it.';
+          } else if (
+            response.status === 400 &&
+            /tool_choice/i.test(errorText) &&
+            (/Thinking mode does not support/i.test(errorText) ||
+              /unsupported/i.test(errorText) ||
+              /not support/i.test(errorText))
+          ) {
+            errorMessage =
+              'Your model does not support tool_choice "required". Add "forceToolChoice": false to your config file to fall back to "auto".';
           }
 
           return {

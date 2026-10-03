@@ -157,7 +157,7 @@ describe("OrcaRouterProvider", () => {
     await provider.executeToolCall("system", "user", toolSchema, "session-id");
 
     expect(capturedBody?.model).toBe(ORCAROUTER_DEFAULT_MODEL);
-    expect(capturedBody?.tool_choice).toBe("auto");
+    expect(capturedBody?.tool_choice).toBe("required");
     expect(Array.isArray(capturedBody?.messages)).toBe(true);
     expect(Array.isArray(capturedBody?.tools)).toBe(true);
   });

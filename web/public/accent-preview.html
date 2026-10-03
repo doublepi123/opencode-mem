@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="de" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>opencode-mem — Farbpaletten</title>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@fontsource-variable/jetbrains-mono@5.2.5/index.min.css"
+    />
+    <style>
+      :root {
+        --bg: #0a0a0a;
+        --card: #141414;
+        --border: #2a2a2a;
+        --fg: #d4d4d4;
+        --bright: #ffffff;
+        --muted: #8a8a8a;
+        font-family: "JetBrains Mono Variable", "JetBrains Mono", ui-monospace, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        padding: 2rem clamp(1rem, 3vw, 2.5rem) 3rem;
+      }
+      h1 {
+        margin: 0 0 0.35rem;
+        font-size: 1.35rem;
+        color: var(--bright);
+      }
+      .lead {
+        margin: 0 0 1.75rem;
+        color: var(--muted);
+        font-size: 0.85rem;
+      }
+      .section {
+        margin: 0 0 0.85rem;
+        font-size: 0.8rem;
+        font-weight: 600;
+        color: var(--muted);
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }
+      #grid-more {
+        margin-top: 0.25rem;
+      }
+      h2.section + .grid {
+        margin-bottom: 2rem;
+      }
+      .grid {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      }
+      .palette {
+        border: 1px solid var(--border);
+        border-radius: 0.9rem;
+        background: var(--card);
+        overflow: hidden;
+        display: flex;
+        flex-direction: column;
+      }
+      .palette.current {
+        outline: 2px solid var(--accent, #c4b5fd);
+        outline-offset: 2px;
+      }
+      .preview {
+        padding: 1rem;
+        background: var(--shell-bg, #0a0a0a);
+        border-bottom: 1px solid var(--border);
+      }
+      .chrome {
+        display: flex;
+        align-items: center;
+        gap: 0.65rem;
+        margin-bottom: 0.85rem;
+      }
+      .well {
+        width: 2.5rem;
+        height: 2.5rem;
+        border-radius: 0.7rem;
+        background: color-mix(in srgb, var(--accent) 15%, transparent);
+        color: var(--accent);
+        display: grid;
+        place-items: center;
+        flex-shrink: 0;
+      }
+      .well svg {
+        width: 1.15rem;
+        height: 1.15rem;
+      }
+      .name {
+        font-weight: 700;
+        color: var(--bright);
+        font-size: 0.95rem;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 0.7rem;
+        margin-top: 0.15rem;
+      }
+      .row {
+        display: flex;
+        gap: 0.45rem;
+        flex-wrap: wrap;
+      }
+      .btn {
+        height: 2rem;
+        padding: 0 0.7rem;
+        border-radius: 0.55rem;
+        border: 1px solid var(--border);
+        background: var(--card);
+        color: var(--fg);
+        font: inherit;
+        font-size: 0.72rem;
+        display: inline-flex;
+        align-items: center;
+      }
+      .btn.primary {
+        background: var(--accent);
+        border-color: transparent;
+        color: var(--on-accent);
+        font-weight: 600;
+      }
+      .meta {
+        padding: 0.9rem 1rem 1rem;
+      }
+      .title {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 0.5rem;
+        margin-bottom: 0.35rem;
+      }
+      .title strong {
+        color: var(--bright);
+        font-size: 0.9rem;
+      }
+      .badge {
+        font-size: 0.65rem;
+        color: var(--accent);
+        border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+        border-radius: 999px;
+        padding: 0.1rem 0.45rem;
+      }
+      .vibe {
+        color: var(--muted);
+        font-size: 0.75rem;
+        margin: 0 0 0.75rem;
+        line-height: 1.4;
+      }
+      .swatches {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 0.35rem;
+      }
+      .swatch {
+        display: flex;
+        flex-direction: column;
+        gap: 0.25rem;
+      }
+      .chip {
+        height: 2rem;
+        border-radius: 0.4rem;
+        border: 1px solid #ffffff18;
+      }
+      .hex {
+        font-size: 0.58rem;
+        color: var(--muted);
+        text-align: center;
+        word-break: break-all;
+      }
+      .light {
+        margin-top: 0.75rem;
+        padding-top: 0.75rem;
+        border-top: 1px solid var(--border);
+      }
+      .light .label {
+        font-size: 0.65rem;
+        color: var(--muted);
+        margin-bottom: 0.4rem;
+      }
+      .light-bar {
+        height: 2.25rem;
+        border-radius: 0.5rem;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 0.65rem;
+        font-size: 0.7rem;
+        border: 1px solid #00000014;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Farbpaletten — opencode-mem</h1>
+    <p class="lead">Accent-Varianten auf derselben Dark-Shell. Aktuell markiert.</p>
+    <h2 class="section">Erste Runde</h2>
+    <div class="grid" id="grid"></div>
+    <h2 class="section">Weitere Vorschläge</h2>
+    <div class="grid" id="grid-more"></div>
+
+    <script>
+      const brain = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M12 18V5"/><path d="M15 13a4.17 4.17 0 0 1-3-4 4.17 4.17 0 0 1-3 4"/>
+        <path d="M17.598 6.5A3 3 0 1 0 12 5a3 3 0 1 0-5.598 1.5"/>
+        <path d="M17.997 5.125a4 4 0 0 1 2.526 5.77"/><path d="M18 18a4 4 0 0 0 2-7.464"/>
+        <path d="M19.967 17.483A4 4 0 1 1 12 18a4 4 0 1 1-7.967-.517"/>
+        <path d="M6 18a4 4 0 0 1-2-7.464"/><path d="M6.003 5.125a4 4 0 0 0-2.526 5.77"/>
+      </svg>`;
+
+      const palettes = [
+        {
+          id: "emerald",
+          name: "Emerald",
+          vibe: "Ruhig, memory-grün — frühere Projektfarbe.",
+          current: false,
+          dark: {
+            accent: "#34d399",
+            on: "#052e1c",
+            lightPrimary: "#059669",
+            lightOn: "#f0fdf4",
+            lightBg: "#f4f5f4",
+            lightFg: "#1a1c1a",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#34d399", "#059669"],
+        },
+        {
+          id: "teal",
+          name: "Teal Depth",
+          vibe: "Kühler und tiefer — wirkt etwas „Speicher/Ozean“.",
+          dark: {
+            accent: "#2dd4bf",
+            on: "#042f2e",
+            lightPrimary: "#0f766e",
+            lightOn: "#f0fdfa",
+            lightBg: "#f3f6f6",
+            lightFg: "#1a1c1c",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#2dd4bf", "#0f766e"],
+        },
+        {
+          id: "sky",
+          name: "Sky Signal",
+          vibe: "Klar und IDE-nah — guter Kontrast auf Dark.",
+          dark: {
+            accent: "#38bdf8",
+            on: "#0c4a6e",
+            lightPrimary: "#0284c7",
+            lightOn: "#f0f9ff",
+            lightBg: "#f3f6f9",
+            lightFg: "#1a1c1f",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#38bdf8", "#0284c7"],
+        },
+        {
+          id: "amber",
+          name: "Amber Circuit",
+          vibe: "Warm und auffällig — starker Signal-Charakter.",
+          dark: {
+            accent: "#fbbf24",
+            on: "#422006",
+            lightPrimary: "#d97706",
+            lightOn: "#fffbeb",
+            lightBg: "#f7f5f0",
+            lightFg: "#1c1a16",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#fbbf24", "#d97706"],
+        },
+        {
+          id: "rose",
+          name: "Soft Rose",
+          vibe: "Weich und markant — klar anders als Tech-Grün.",
+          dark: {
+            accent: "#fb7185",
+            on: "#4c0519",
+            lightPrimary: "#e11d48",
+            lightOn: "#fff1f2",
+            lightBg: "#f7f3f4",
+            lightFg: "#1c1a1b",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#fb7185", "#e11d48"],
+        },
+        {
+          id: "ice",
+          name: "Ice Slate",
+          vibe: "Zurückhaltend — Eis-Cyan auf Slate, sehr ruhig.",
+          dark: {
+            accent: "#67e8f9",
+            on: "#083344",
+            lightPrimary: "#0891b2",
+            lightOn: "#ecfeff",
+            lightBg: "#f4f5f6",
+            lightFg: "#1a1c1e",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#67e8f9", "#0891b2"],
+        },
+      ];
+
+      const morePalettes = [
+        {
+          id: "lime",
+          name: "Acid Lime",
+          vibe: "Scharfer als Emerald — energetisch, etwas Terminal-Feeling.",
+          dark: {
+            accent: "#a3e635",
+            on: "#1a2e05",
+            lightPrimary: "#65a30d",
+            lightOn: "#f7fee7",
+            lightBg: "#f5f6f2",
+            lightFg: "#1a1c16",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#a3e635", "#65a30d"],
+        },
+        {
+          id: "orange",
+          name: "Volt Orange",
+          vibe: "Wärmer als Amber — direkter Call-to-Action-Ton.",
+          dark: {
+            accent: "#fb923c",
+            on: "#431407",
+            lightPrimary: "#ea580c",
+            lightOn: "#fff7ed",
+            lightBg: "#f7f4f0",
+            lightFg: "#1c1a17",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#fb923c", "#ea580c"],
+        },
+        {
+          id: "cyan",
+          name: "Cyan Punch",
+          vibe: "Kräftiger als Ice — sehr lesbar, modern-techig.",
+          dark: {
+            accent: "#22d3ee",
+            on: "#083344",
+            lightPrimary: "#0e7490",
+            lightOn: "#ecfeff",
+            lightBg: "#f2f6f7",
+            lightFg: "#1a1c1d",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#22d3ee", "#0e7490"],
+        },
+        {
+          id: "violet",
+          name: "Muted Violet",
+          vibe: "Aktuell — ruhiges Violett, weniger Neon als typisches Purple-AI.",
+          current: true,
+          dark: {
+            accent: "#c4b5fd",
+            on: "#2e1065",
+            lightPrimary: "#7c3aed",
+            lightOn: "#f5f3ff",
+            lightBg: "#f5f4f8",
+            lightFg: "#1b1a1f",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#c4b5fd", "#7c3aed"],
+        },
+        {
+          id: "copper",
+          name: "Copper Wire",
+          vibe: "Metallisch-warm — ungewöhnlich für Dev-Tools, aber edel.",
+          dark: {
+            accent: "#e7a17a",
+            on: "#3b1c0d",
+            lightPrimary: "#c2410c",
+            lightOn: "#fff7ed",
+            lightBg: "#f6f3ef",
+            lightFg: "#1c1a17",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#e7a17a", "#c2410c"],
+        },
+        {
+          id: "mint",
+          name: "Pale Mint",
+          vibe: "Heller und weicher als Emerald — sehr zurückhaltend.",
+          dark: {
+            accent: "#6ee7b7",
+            on: "#064e3b",
+            lightPrimary: "#059669",
+            lightOn: "#ecfdf5",
+            lightBg: "#f4f6f5",
+            lightFg: "#1a1c1a",
+          },
+          swatches: ["#0a0a0a", "#141414", "#2a2a2a", "#6ee7b7", "#059669"],
+        },
+      ];
+
+      function renderPalettes(list, targetId) {
+        const grid = document.getElementById(targetId);
+        for (const p of list) {
+          const el = document.createElement("article");
+          el.className = "palette" + (p.current ? " current" : "");
+          el.style.setProperty("--accent", p.dark.accent);
+          el.style.setProperty("--on-accent", p.dark.on);
+          el.innerHTML = `
+          <div class="preview">
+            <div class="chrome">
+              <span class="well">${brain}</span>
+              <div>
+                <div class="name">opencode-mem</div>
+                <div class="sub">${p.name}</div>
+              </div>
+            </div>
+            <div class="row">
+              <span class="btn primary">Cleanup</span>
+              <span class="btn">Filter</span>
+              <span class="btn">Deduplicate</span>
+            </div>
+          </div>
+          <div class="meta">
+            <div class="title">
+              <strong>${p.name}</strong>
+              ${p.current ? '<span class="badge">aktuell</span>' : ""}
+            </div>
+            <p class="vibe">${p.vibe}</p>
+            <div class="swatches">
+              ${p.swatches
+                .map(
+                  (c) =>
+                    `<div class="swatch"><div class="chip" style="background:${c}"></div><div class="hex">${c}</div></div>`
+                )
+                .join("")}
+            </div>
+            <div class="light">
+              <div class="label">Light mode</div>
+              <div class="light-bar" style="background:${p.dark.lightBg};color:${p.dark.lightFg}">
+                <span>opencode-mem</span>
+                <span style="color:${p.dark.lightPrimary};font-weight:700">${p.dark.lightPrimary}</span>
+              </div>
+            </div>
+          </div>`;
+          grid.appendChild(el);
+        }
+      }
+
+      renderPalettes(palettes, "grid");
+      renderPalettes(morePalettes, "grid-more");
+    </script>
+  </body>
+</html>

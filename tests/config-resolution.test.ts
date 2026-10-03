@@ -188,4 +188,58 @@ describe("project-scoped config resolution", () => {
     expect(CONFIG.autoCaptureEnabled).toBe(true); // default value
     expect(CONFIG.opencodeProvider).toBeUndefined();
   });
+
+  it("resolves Atlas Cloud API key from ATLASCLOUD_API_KEY and marks manual ready", () => {
+    const originalApiKey = process.env.ATLASCLOUD_API_KEY;
+    process.env.ATLASCLOUD_API_KEY = "atlas-test-key";
+
+    try {
+      existsSpy = spyOn(fs, "existsSync").mockReturnValue(true);
+      readSpy = spyOn(fs, "readFileSync").mockImplementation((p) => {
+        const path = normalizePath(p);
+        if (path.includes(".opencode/opencode-mem")) {
+          return JSON.stringify({ autoCaptureEnabled: true }) as any;
+        }
+        return JSON.stringify({ memoryProvider: "atlas-cloud" }) as any;
+      });
+
+      initConfig("/my/project");
+
+      expect(CONFIG.memoryProvider).toBe("atlas-cloud");
+      expect(CONFIG.memoryModel).toBeUndefined();
+      expect(CONFIG.memoryApiUrl).toBeUndefined();
+      expect(CONFIG.memoryApiKey).toBe("atlas-test-key");
+      expect(CONFIG.autoCaptureProviderStatus).toEqual({
+        ready: true,
+        mode: "manual",
+        issues: [],
+      });
+    } finally {
+      if (originalApiKey === undefined) {
+        delete process.env.ATLASCLOUD_API_KEY;
+      } else {
+        process.env.ATLASCLOUD_API_KEY = originalApiKey;
+      }
+    }
+  });
+
+  it("refuses a project config that switches memoryProvider to Atlas Cloud", () => {
+    existsSpy = spyOn(fs, "existsSync").mockReturnValue(true);
+    readSpy = spyOn(fs, "readFileSync").mockImplementation((p) => {
+      const path = normalizePath(p);
+      if (path.includes(".opencode/opencode-mem")) {
+        return JSON.stringify({ memoryProvider: "atlas-cloud" }) as any;
+      }
+      return JSON.stringify({
+        memoryProvider: "openai-chat",
+        memoryModel: "gpt-global",
+        memoryApiUrl: "https://api.openai.com/v1",
+        memoryApiKey: "global-openai-secret",
+      }) as any;
+    });
+
+    expect(() => initConfig("/my/project")).toThrow(
+      /Project config cannot set remote provider fields: memoryProvider/
+    );
+  });
 });

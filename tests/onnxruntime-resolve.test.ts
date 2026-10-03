@@ -96,8 +96,8 @@ describe("onnxruntime resolve shim (#184 / #210)", () => {
     expect(message).toContain("darwin/x64");
     expect(message).toContain("embeddingApiUrl");
     expect(message).toContain("embeddingApiKey");
-    expect(message).toContain("1.20.1");
-    expect(message).toContain("#225");
+    expect(message).toContain("1.30.0");
+    expect(message).toContain("unsupported");
   });
 
   it("discovers the napi layout shipped by the pinned onnxruntime-node package", () => {

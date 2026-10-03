@@ -9,7 +9,6 @@ on:
       - "src/**"
       - "scripts/native-deps-smoke.mjs"
       - "scripts/verify-libsql-vector.mjs"
-      - "scripts/verify-nested-onnxruntime-fixture.mjs"
       - "scripts/smoke-test.mjs"
       - "web/**"
       - "eslint.config.js"
@@ -25,13 +24,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Intel: macos-15-intel / macos-26-intel (darwin/x64).
+        # Apple Silicon only for macOS: @tursodatabase/database and
+        # onnxruntime-node@1.30.0 ship no darwin/x64 binding. Intel Mac support is dropped.
         # Apple Silicon: macos-15 / macos-26 (darwin/arm64).
+        # Explicit Ubuntu pins (ubuntu-latest → 26.04 starting 2026-10-19).
+        # Keep 24.04 + 26.04 like macos-15 / macos-26.
         os:
-          - ubuntu-latest
+          - ubuntu-24.04
+          - ubuntu-26.04
           - windows-latest
-          - macos-15-intel
-          - macos-26-intel
           - macos-15
           - macos-26
 
@@ -51,15 +52,6 @@ jobs:
       - name: Install web dependencies
         working-directory: web
         run: bun install
-
-      - name: Typecheck source
-        run: bun run typecheck
-
-      - name: Lint source
-        run: bun run lint
-
-      - name: Check formatting
-        run: bun run format:check
 
       - name: Build package artifacts
         run: bun run build

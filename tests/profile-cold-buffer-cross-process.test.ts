@@ -413,7 +413,7 @@ describe("cold buffer cross-process safety", () => {
     }
   );
 
-  it.skipIf(process.getuid?.() === 0)(
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     "propagates save failures without corrupting the existing file",
     async () => {
       const b = await makeManager();

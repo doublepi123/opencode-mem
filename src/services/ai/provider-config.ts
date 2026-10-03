@@ -7,6 +7,7 @@ interface MemoryProviderRuntimeConfig {
   memoryApiUrl?: string;
   memoryApiKey?: string;
   memoryTemperature?: number | false;
+  forceToolChoice?: boolean;
   memoryExtraParams?: Record<string, unknown>;
   autoCaptureMaxIterations?: number;
   autoCaptureIterationTimeout?: number;
@@ -26,12 +27,13 @@ export function buildMemoryProviderConfig(
   const memoryApiKey = config.memoryApiKey;
   const issues: string[] = [];
 
-  // The orcarouter provider presets its own endpoint and default model, so
-  // memoryModel / memoryApiUrl are optional there. An API key is always required.
-  const isOrcaRouter = config.memoryProvider === "orcarouter";
+  // Preset providers fill endpoint/model themselves, so memoryModel /
+  // memoryApiUrl are optional there. An API key is always required.
+  const isPresetProvider =
+    config.memoryProvider === "orcarouter" || config.memoryProvider === "atlas-cloud";
 
-  if (!memoryModel && !isOrcaRouter) issues.push("missing memoryModel");
-  if (!memoryApiUrl && !isOrcaRouter) issues.push("missing memoryApiUrl");
+  if (!memoryModel && !isPresetProvider) issues.push("missing memoryModel");
+  if (!memoryApiUrl && !isPresetProvider) issues.push("missing memoryApiUrl");
   if (!memoryApiKey) issues.push("missing memoryApiKey");
   if (isPlaceholderApiKey(memoryApiKey)) issues.push("replace the placeholder memoryApiKey value");
 
@@ -44,6 +46,7 @@ export function buildMemoryProviderConfig(
     apiUrl: memoryApiUrl || "",
     apiKey: memoryApiKey || "",
     memoryTemperature: config.memoryTemperature,
+    forceToolChoice: config.forceToolChoice,
     extraParams: config.memoryExtraParams,
     maxIterations: overrides.maxIterations ?? config.autoCaptureMaxIterations,
     iterationTimeout: overrides.iterationTimeout ?? config.autoCaptureIterationTimeout,

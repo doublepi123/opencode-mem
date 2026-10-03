@@ -1,0 +1,20 @@
+{
+  "success": true,
+  "data": [
+    {
+      "version": 4,
+      "createdAt": "2026-10-01T20:15:00.000Z",
+      "summary": "Merged duplicate UI preferences; raised confidence on code-style."
+    },
+    {
+      "version": 3,
+      "createdAt": "2026-09-20T12:00:00.000Z",
+      "summary": "Added workflow for brand asset updates."
+    },
+    {
+      "version": 2,
+      "createdAt": "2026-09-01T09:30:00.000Z",
+      "summary": "Initial patterns from early frontend migration chats."
+    }
+  ]
+}

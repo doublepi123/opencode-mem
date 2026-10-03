@@ -1,0 +1,21 @@
+{
+  "success": true,
+  "data": {
+    "old": {
+      "preferences": [
+        { "category": "ui", "description": "Likes green accents", "confidence": 0.5 },
+        { "category": "ui", "description": "Prefers blue accents", "confidence": 0.7 }
+      ]
+    },
+    "new": {
+      "preferences": [
+        { "category": "ui", "description": "Prefers muted blue accents", "confidence": 0.88 }
+      ]
+    },
+    "changes": {
+      "merged": [{ "ids": ["pref_a", "pref_b"], "result": "Prefers muted blue accents" }],
+      "removed": [{ "id": "pref_old", "reason": "Superseded by blue preference" }],
+      "kept": ["pref_code_style"]
+    }
+  }
+}

@@ -368,49 +368,12 @@ export class UserProfileManager {
 
   private async initDatabase(): Promise<void> {
     const db = this.db!;
-    await db.batch([
-      {
-        sql: `
-          CREATE TABLE IF NOT EXISTS user_profiles (
-            id TEXT PRIMARY KEY,
-            user_id TEXT NOT NULL UNIQUE,
-            display_name TEXT NOT NULL,
-            user_name TEXT NOT NULL,
-            user_email TEXT NOT NULL,
-            profile_data TEXT NOT NULL,
-            version INTEGER NOT NULL DEFAULT 1,
-            created_at INTEGER NOT NULL,
-            last_analyzed_at INTEGER NOT NULL,
-            total_prompts_analyzed INTEGER NOT NULL DEFAULT 0,
-            is_active BOOLEAN NOT NULL DEFAULT 1
-          )
-        `,
-      },
-      {
-        sql: `
-          CREATE TABLE IF NOT EXISTS user_profile_changelogs (
-            id TEXT PRIMARY KEY,
-            profile_id TEXT NOT NULL,
-            version INTEGER NOT NULL,
-            change_type TEXT NOT NULL,
-            change_summary TEXT NOT NULL,
-            profile_data_snapshot TEXT NOT NULL,
-            created_at INTEGER NOT NULL,
-            FOREIGN KEY (profile_id) REFERENCES user_profiles(id) ON DELETE CASCADE
-          )
-        `,
-      },
-      { sql: "CREATE INDEX IF NOT EXISTS idx_user_profiles_user_id ON user_profiles(user_id)" },
-      {
-        sql: "CREATE INDEX IF NOT EXISTS idx_user_profiles_is_active ON user_profiles(is_active)",
-      },
-      {
-        sql: "CREATE INDEX IF NOT EXISTS idx_user_profile_changelogs_profile_id ON user_profile_changelogs(profile_id)",
-      },
-      {
-        sql: "CREATE INDEX IF NOT EXISTS idx_user_profile_changelogs_version ON user_profile_changelogs(version DESC)",
-      },
-    ]);
+    const { applySchemaMigrations, USER_PROFILES_MIGRATIONS } =
+      await import("../turso/schema-migrations.js");
+    await applySchemaMigrations(db, USER_PROFILES_MIGRATIONS, {
+      dbPath: this.dbPath,
+      label: "user-profiles.db",
+    });
   }
 
   async getActiveProfile(userId: string): Promise<UserProfile | null> {

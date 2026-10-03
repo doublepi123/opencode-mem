@@ -1,14 +1,6 @@
-import {
-  createContext,
-  createElement,
-  useContext,
-  useMemo,
-  useSyncExternalStore,
-  type ReactNode,
-} from "react";
 import { translations, type Lang, type TranslationKey } from "./translations";
 
-const LANGS: Lang[] = ["en", "zh", "ar"];
+const LANGS = Object.keys(translations) as Lang[];
 
 export type TranslateFn = (
   key: TranslationKey | string,
@@ -18,7 +10,7 @@ export type TranslateFn = (
 function readLang(): Lang {
   if (typeof window === "undefined") return "en";
   const stored = localStorage.getItem("opencode-mem-lang");
-  if (stored === "en" || stored === "zh" || stored === "ar") return stored;
+  if (stored && stored in translations) return stored as Lang;
   return "en";
 }
 
@@ -39,19 +31,11 @@ function applyLang(lang: Lang) {
   emit();
 }
 
-function subscribe(listener: () => void) {
+export function subscribeLanguage(listener: () => void) {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);
   };
-}
-
-function getSnapshot() {
-  return currentLang;
-}
-
-function getServerSnapshot(): Lang {
-  return "en";
 }
 
 export function getLanguage(): Lang {
@@ -82,43 +66,6 @@ export function t(
     text = text.replace(new RegExp(`\\{${k}\\}`, "g"), String(v));
   }
   return text;
-}
-
-type I18nContextValue = {
-  language: Lang;
-  t: TranslateFn;
-};
-
-const I18nContext = createContext<I18nContextValue | null>(null);
-
-function useLanguageStore(): Lang {
-  return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
-}
-
-export function I18nProvider({ children }: { children: ReactNode }) {
-  const language = useLanguageStore();
-  const value = useMemo<I18nContextValue>(
-    () => ({
-      language,
-      t: (key, params = {}) => t(key, params, language),
-    }),
-    [language]
-  );
-
-  return createElement(I18nContext.Provider, { value }, children);
-}
-
-export function useI18n(): I18nContextValue {
-  const ctx = useContext(I18nContext);
-  const language = useLanguageStore();
-  return useMemo(
-    () =>
-      ctx ?? {
-        language,
-        t: (key, params = {}) => t(key, params, language),
-      },
-    [ctx, language]
-  );
 }
 
 if (typeof document !== "undefined") {

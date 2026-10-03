@@ -255,7 +255,7 @@ describe("OpenAIChatCompletionProvider", () => {
     expect(capturedBody?.model).toBe("gpt-4o-mini");
     expect(Array.isArray(capturedBody?.messages)).toBe(true);
     expect(Array.isArray(capturedBody?.tools)).toBe(true);
-    expect(capturedBody?.tool_choice).toBe("auto");
+    expect(capturedBody?.tool_choice).toBe("required");
   });
 
   it("includes temperature 0.3 by default", async () => {
@@ -320,6 +320,25 @@ describe("OpenAIChatCompletionProvider", () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain("memoryTemperature");
+  });
+
+  it("returns friendly message when thinking mode rejects tool_choice required", async () => {
+    globalThis.fetch = makeFetch({
+      ok: false,
+      status: 400,
+      body: "Thinking mode does not support this tool_choice",
+    });
+
+    const result = await makeProvider({ apiUrl: "https://api.openai.com/v1" }).executeToolCall(
+      "system",
+      "user",
+      toolSchema,
+      "session-id"
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("forceToolChoice");
+    expect(result.error).toContain("false");
   });
 
   it("returns success: false when response has no choices", async () => {
@@ -438,5 +457,79 @@ describe("OpenAIChatCompletionProvider", () => {
     }).executeToolCall("system", "user", toolSchema, "session-id");
 
     expect(result.success).toBe(false);
+  });
+
+  it("defaults to tool_choice=required so models cannot answer with prose", async () => {
+    let sentBody: any;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body));
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        text: async () => "",
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-1",
+                    type: "function",
+                    function: { name: "save_memories", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      } as Response;
+    }) as typeof fetch;
+
+    await makeProvider({ apiUrl: "https://api.openai.com/v1" }).executeToolCall(
+      "system",
+      "user",
+      toolSchema,
+      "session-id"
+    );
+
+    expect(sentBody.tool_choice).toBe("required");
+  });
+
+  it("honors forceToolChoice=false to fall back to tool_choice=auto", async () => {
+    let sentBody: any;
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      sentBody = JSON.parse(String(init?.body));
+      return {
+        ok: true,
+        status: 200,
+        statusText: "OK",
+        text: async () => "",
+        json: async () => ({
+          choices: [
+            {
+              message: {
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call-1",
+                    type: "function",
+                    function: { name: "save_memories", arguments: "{}" },
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+      } as Response;
+    }) as typeof fetch;
+
+    await makeProvider({
+      apiUrl: "https://api.openai.com/v1",
+      forceToolChoice: false,
+    }).executeToolCall("system", "user", toolSchema, "session-id");
+
+    expect(sentBody.tool_choice).toBe("auto");
   });
 });
