@@ -2,6 +2,7 @@ import { afterAll, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * Auto-capture scheduling liveness: two independent finished sessions must
@@ -14,7 +15,11 @@ import { join } from "node:path";
  * timers are captured and fired deterministically (no 10s wall sleeps).
  */
 
-const REPO_ROOT = new URL("..", import.meta.url).pathname;
+// file:// URL of the repo root (tests/). Never use URL.pathname: on Windows
+// it yields "/D:/a/..." which is an invalid spawn cwd and a broken file URL
+// base — resolve paths through fileURLToPath and URL-relative href instead.
+const REPO_URL = new URL("../", import.meta.url);
+const REPO_ROOT = fileURLToPath(REPO_URL);
 
 const tempDirs: string[] = [];
 
@@ -28,7 +33,7 @@ afterAll(() => {
   }
 });
 
-const u = (p: string) => new URL(`${REPO_ROOT}${p}`, "file://").href;
+const u = (p: string) => new URL(p, REPO_URL).href;
 
 /**
  * Spawns an isolated child and returns parsed stdout JSON. The child script
