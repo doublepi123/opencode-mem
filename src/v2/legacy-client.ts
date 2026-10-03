@@ -122,9 +122,22 @@ export function createLegacyClient(ctx: Context) {
     app: { log: async () => ({ data: true }) },
     provider: {
       list: async () => {
-        const models = await ctx.model.list();
+        // Provider connectivity must come from the real provider directory
+        // (ctx.provider.list(), ProviderInfo.activation), never from
+        // model.list: model ids carry the broker's providerID (e.g. every
+        // proxied model reports 'opencode'), which hides the actual enabled
+        // providers (e.g. 'newapi') and makes isProviderConnected deny a
+        // live provider. Disabled providers are excluded; auto/enabled pass;
+        // ids dedup. Errors propagate to the caller (the plugin init path
+        // already catches and logs) — an error must not be turned into a
+        // fabricated "no providers connected" result.
+        const providers = await ctx.provider.list();
         const connected = [
-          ...new Set(models.data.map((model) => model.providerID).filter(Boolean)),
+          ...new Set(
+            providers.data
+              .filter((provider) => provider.activation !== "disabled")
+              .map((provider) => provider.id)
+          ),
         ];
         return { data: { connected } };
       },
