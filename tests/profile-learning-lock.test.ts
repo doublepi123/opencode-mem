@@ -521,6 +521,21 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
     expect(variants["valid-different-date-steal"]).toBe(true);
   }, 120_000);
 
+  it("live Darwin ps garbage against a valid stored identity must not steal (simulated)", async () => {
+    // Self identity is a valid lstart; the foreign owner's live `ps` returns
+    // malformed text. Without live-read validation, inequality would CAS-steal.
+    const dir = storage();
+    const worker = spawnWorker(dir, "darwin-sim", "live-garbage", {
+      PLL_STARTTIME: "Sat Oct  3 09:00:00 2026",
+    });
+    const result = await worker.result;
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.parsed?.["ownStarttime"]).toBe("darwin:Sat Oct  3 09:00:00 2026");
+    expect(result.parsed?.["stolen"]).toBe(false);
+    expect(result.parsed?.["token"]).toBe("planted-live-ps-garbage");
+  }, 60_000);
+
   it("an untrusted local boot_id never acts as a dead signal", async () => {
     // Worker forces the local boot identity reader to return garbage.
     if (!HAS_BOOT_IDENTITY) return;

@@ -6,7 +6,7 @@ import { memoryClient } from "./services/client.js";
 import { formatContextForPrompt } from "./services/context.js";
 import { getTags } from "./services/tags.js";
 import { stripPrivateContent, isFullyPrivate } from "./services/privacy.js";
-import { performAutoCapture } from "./services/auto-capture.js";
+import { awaitCaptureDrain, performAutoCapture } from "./services/auto-capture.js";
 import { performUserProfileLearning } from "./services/user-memory-learning.js";
 import { userPromptManager } from "./services/user-prompt/user-prompt-manager.js";
 import { startWebServer, WebServer } from "./services/web-server.js";
@@ -478,6 +478,9 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
     pluginLifetime.abort();
     for (const timer of idleTimers.values()) clearTimeout(timer);
     idleTimers.clear();
+    // Drain in-flight (and already-queued-before-abort) captures before
+    // closing storage: abort only skips not-yet-started jobs.
+    await awaitCaptureDrain();
     if (webServer) await webServer.stop();
     if (memoryClient) await memoryClient.close();
   };
@@ -1152,6 +1155,12 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
           }
         }, 10000);
         idleTimers.set(sessionID, timer);
+        // Dispose may have cleared the map between the cleanedUp check above
+        // and this set; never leave an orphan timer armed after cleanup.
+        if (cleanedUp) {
+          clearTimeout(timer);
+          idleTimers.delete(sessionID);
+        }
       }
 
       if (event.type === "session.compacted") {

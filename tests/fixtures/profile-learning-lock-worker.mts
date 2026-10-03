@@ -169,8 +169,12 @@ if (mode === "cas-race") {
 //                 (self and owner alike): the simulated host's ps answers a
 //                 single controlled value, so same-kind comparisons are
 //                 deterministic and weekday-consistent.
+//   live-garbage  PLL_STARTTIME is returned only for THIS worker pid (self
+//                 identity). Any other pid's `ps` answers a malformed lstart
+//                 so the live-read path can be asserted fail-closed.
 if (mode === "darwin-sim") {
   const forcedSelfLstart = process.env.PLL_STARTTIME ?? null;
+  const liveGarbageForForeignPids = process.env.PLL_LABEL === "live-garbage";
   // Simulated host boot identity: sysctl kern.boottime → sec=1760000000.
   // The owner rows planted in this mode intentionally keep boot_id NULL so
   // boot comparison can never fire and the starttime paths are the only
@@ -185,9 +189,15 @@ if (mode === "darwin-sim") {
         args.includes("-o") &&
         args.includes("lstart=")
       ) {
+        const pidIdx = args.indexOf("-p");
+        const requestedPid = pidIdx >= 0 ? Number(args[pidIdx + 1]) : NaN;
+        const stdout =
+          liveGarbageForForeignPids && requestedPid !== process.pid
+            ? "not-a-valid-lstart"
+            : (forcedSelfLstart ?? "");
         return {
           status: 0,
-          stdout: forcedSelfLstart ?? "",
+          stdout,
           stderr: "",
           pid: 0,
           output: [],
@@ -563,6 +573,62 @@ try {
       // every pid, so the "current" identity is that exact valid lstart and
       // same-kind comparisons are deterministic. Owner rows are planted on
       // THIS live worker pid with boot_id NULL.
+      //
+      // PLL_LABEL = live-garbage: self gets a valid lstart; foreign pids get
+      // malformed ps output. A valid stored identity on an alive foreign pid
+      // must NOT be stolen via the inequality path.
+      if (process.env.PLL_LABEL === "live-garbage") {
+        const ownStarttime = lock.getProfileLearningStarttime(process.pid);
+        if (!ownStarttime) {
+          console.error("live-garbage requires the simulated ps to yield a valid self lstart");
+          process.exit(1);
+        }
+        // Prefer a definitely-alive foreign pid (init). Fall back to self+1
+        // only if kill(0) on pid 1 is denied — still exercises the live-read
+        // garbage path as long as the signal probe does not declare death.
+        let foreignPid = 1;
+        try {
+          process.kill(1, 0);
+        } catch {
+          foreignPid = process.pid === 1 ? 2 : process.pid + 1;
+          try {
+            process.kill(foreignPid, 0);
+          } catch {
+            // Still plant: with garbage live-read the starttime path must
+            // fail closed before the signal probe can reclaim.
+          }
+        }
+        const storedValid = "darwin:Sun Nov 16 10:11:12 2025";
+        const db = await openDb();
+        try {
+          await db.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+            name TEXT PRIMARY KEY,
+            owner_token TEXT NOT NULL,
+            pid INTEGER NOT NULL,
+            boot_id TEXT,
+            starttime TEXT,
+            acquired_at INTEGER NOT NULL
+          )`);
+          await db.execute({
+            sql: `INSERT OR REPLACE INTO profile_learning_lock
+                    (name, owner_token, pid, boot_id, starttime, acquired_at)
+                  VALUES ('profile-learning', ?, ?, NULL, ?, ?)`,
+            args: ["planted-live-ps-garbage", foreignPid, storedValid, Date.now()],
+          });
+        } finally {
+          db.close();
+        }
+        const release = await lock.tryAcquireProfileLearningLock("/project-darwin-live-garbage");
+        const token = await readOwnerToken();
+        if (release) await release();
+        out({
+          ownStarttime,
+          foreignPid,
+          stolen: release !== null,
+          token,
+        });
+        break;
+      }
       const ownStarttime = lock.getProfileLearningStarttime(process.pid);
       if (!ownStarttime) {
         console.error("darwin-sim requires the simulated ps to yield a valid lstart");

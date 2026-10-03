@@ -1,4 +1,8 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createLegacyClient } from "../src/v2/legacy-client.js";
 
 /**
@@ -161,5 +165,43 @@ describe("v2 legacy client provider connectivity", () => {
     expect(JSON.stringify(result)).not.toContain("sk-secret-value");
     expect(JSON.stringify(result)).not.toContain("Display Name");
     expect(JSON.stringify(result)).not.toContain("canonical");
+  });
+
+  it("flows connected ids through setConnectedProviders → isProviderConnected (subprocess gate)", () => {
+    const home = mkdtempSync(join(tmpdir(), "opencode-mem-v2-provider-gate-"));
+    try {
+      const child = Bun.spawnSync({
+        cmd: [
+          process.execPath,
+          fileURLToPath(new URL("./fixtures/v2-provider-gate.mjs", import.meta.url)),
+        ],
+        env: {
+          ...process.env,
+          HOME: home,
+          USERPROFILE: home,
+          XDG_CONFIG_HOME: join(home, ".config"),
+          XDG_DATA_HOME: join(home, ".local", "share"),
+          XDG_STATE_HOME: join(home, ".local", "state"),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      expect(child.exitCode).toBe(0);
+      expect(child.stderr.toString()).toBe("");
+      const output = JSON.parse(child.stdout.toString().trim()) as {
+        connected: string[];
+        enabledNewapi: boolean;
+        autoOpencode: boolean;
+        disabledLegacyOff: boolean;
+        unknown: boolean;
+      };
+      expect(output.connected).toEqual(["newapi", "opencode"]);
+      expect(output.enabledNewapi).toBe(true);
+      expect(output.autoOpencode).toBe(true);
+      expect(output.disabledLegacyOff).toBe(false);
+      expect(output.unknown).toBe(false);
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

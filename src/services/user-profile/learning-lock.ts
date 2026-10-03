@@ -135,9 +135,10 @@ function readBootId(): string | null {
 /**
  * Reads a process starttime identity used for PID-reuse detection.
  *
- * - Linux: field 22 of `/proc/<pid>/stat` (clock ticks since boot)
- * - Darwin: `ps -p <pid> -o lstart=` under LC_ALL=C, stored as unix-ms digits
- *   so the coordination row stays a simple numeric string
+ * - Linux: field 22 of `/proc/<pid>/stat` (clock ticks since boot), stored as
+ *   decimal clock-tick digits
+ * - Darwin: `ps -p <pid> -o lstart=` under LC_ALL=C, stored as `darwin:<lstart>`
+ *   raw text (never Date.parsed / never normalized to unix-ms)
  */
 function readLinuxProcStat(pid: number): ProcStatResult {
   let stat: string;
@@ -178,6 +179,13 @@ function readDarwinStarttime(pid: number): ProcStatResult {
     // across bun test vs worker processes (UTC vs local), which would make a
     // live holder look like PID reuse.
     //
+    // Live reads must pass the same strict calendar validation as stored
+    // rows: a transient / malformed `ps` rendering (anything that is not a
+    // valid LC_ALL=C lstart) must degrade to "unreadable" rather than become
+    // a comparable identity. Otherwise `stat.starttime !== owner.starttime`
+    // would fire a PID-reuse steal against a live holder whose stored row is
+    // well-formed.
+    //
     // TZ note (known limitation, deliberate non-change): lstart rendering can
     // still depend on the reading process's TZ environment even under
     // LC_ALL=C. Because the raw text is stored (never normalized), a holder
@@ -187,7 +195,11 @@ function readDarwinStarttime(pid: number): ProcStatResult {
     // deployments to justify a format migration — and any migration must
     // keep existing stored rows readable so live holders under the old text
     // are not stolen from. Until then this stays raw-text exact comparison.
-    return { status: "ok", starttime: `darwin:${lstart}` };
+    const starttime = `darwin:${lstart}`;
+    if (parseStoredStarttime(starttime) === null) {
+      return { status: "unreadable" };
+    }
+    return { status: "ok", starttime };
   } catch {
     return { status: "unreadable" };
   }
@@ -434,7 +446,9 @@ function ownerIsDefinitelyDead(owner: ValidOwner, self: ProcessIdentity): boolea
     // a macOS holder can never equal a Linux host's numeric /proc ticks, so
     // treating the inequality as "PID reuse" would CAS-steal a live lock the
     // moment the coordination DB crosses platforms (or holds a foreign-format
-    // row). Fail closed instead: the signal probe alone decides.
+    // row). Fail closed instead: do not declare the owner dead (skip reclaim
+    // this round). The signal probe is intentionally NOT consulted here —
+    // an incomparable identity must never produce a dead assertion.
     if (owner.parsedStarttime === null) {
       return false;
     }
@@ -444,6 +458,12 @@ function ownerIsDefinitelyDead(owner: ValidOwner, self: ProcessIdentity): boolea
     }
     const stat = readProcStat(owner.pid);
     if (stat.status === "ok") {
+      // Belt-and-suspenders: live output is validated in the platform reader
+      // already, but never treat an unparseable live identity as PID reuse.
+      const liveParsed = parseStoredStarttime(stat.starttime);
+      if (liveParsed === null || liveParsed.kind !== owner.parsedStarttime.kind) {
+        return false;
+      }
       return stat.starttime !== owner.starttime;
     }
     if (stat.status === "absent") {

@@ -17,5 +17,7 @@ describe("plugin shutdown", () => {
     expect(source).toMatch(/for \(const timer of idleTimers\.values\(\)\) clearTimeout\(timer\)/);
     expect(source).toContain("idleTimers.clear()");
     expect(source).toContain("pluginLifetime.abort()");
+    // In-flight captures must drain before storage close.
+    expect(source).toContain("awaitCaptureDrain");
   });
 });
