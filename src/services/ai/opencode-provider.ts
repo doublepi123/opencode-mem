@@ -88,6 +88,9 @@ let _v2Client: OpencodeClient | undefined;
 let _v2BaseUrl: string | undefined;
 let _hostFetch: typeof fetch | undefined;
 let _useSdkTransport = false;
+// Registered by the plugin init so a gate miss can force one provider-directory
+// refresh before failing (late host provider registration).
+let _connectedProvidersRefresher: (() => Promise<void>) | undefined;
 
 export function setHostFetch(customFetch: typeof fetch): void {
   _hostFetch = customFetch;
@@ -102,6 +105,34 @@ export function setConnectedProviders(providers: string[]): void {
 }
 
 export function isProviderConnected(providerName: string): boolean {
+  return _connectedProviders.has(providerName);
+}
+
+/** Register (or clear) the refresh callback used by ensureProviderConnected. */
+export function setConnectedProvidersRefresher(refresher?: () => Promise<void>): void {
+  _connectedProvidersRefresher = refresher;
+}
+
+/** Clear the refresh callback only if it is still the one being disposed. */
+export function clearConnectedProvidersRefresher(refresher: () => Promise<void>): void {
+  if (_connectedProvidersRefresher === refresher) _connectedProvidersRefresher = undefined;
+}
+
+/**
+ * Refresh-on-miss for the connectivity gate: when a provider id is missing
+ * from the snapshot and a refresher is registered, await one refresh and
+ * re-check. Returns the re-checked connectivity; never refreshes twice for
+ * the same call and never throws (refresh errors are logged by the refresher).
+ */
+export async function ensureProviderConnected(providerName: string): Promise<boolean> {
+  if (_connectedProviders.has(providerName)) return true;
+  const refresher = _connectedProvidersRefresher;
+  if (!refresher) return false;
+  try {
+    await refresher();
+  } catch {
+    // The refresher logs; a failed refresh keeps the previous set.
+  }
   return _connectedProviders.has(providerName);
 }
 

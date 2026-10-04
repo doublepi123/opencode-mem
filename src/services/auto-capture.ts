@@ -520,7 +520,7 @@ async function generateSummary(
         log("opencodeProvider takes precedence over memoryModel for auto-capture");
       }
 
-      const { isProviderConnected, getV2Client, generateStructuredOutput } =
+      const { ensureProviderConnected, getV2Client, generateStructuredOutput } =
         await loadOpencodeProvider();
 
       // "inherit" resolves to the model opencode used for the captured prompt
@@ -538,7 +538,9 @@ async function generateSummary(
         modelID = prompt.modelId;
       }
 
-      if (!isProviderConnected(providerID)) {
+      // One refresh-on-miss before failing: user-config providers register
+      // seconds after plugin setup, so the init snapshot may lag the host.
+      if (!(await ensureProviderConnected(providerID))) {
         throw new Error(
           `opencode provider '${providerID}' is not connected. Check your opencode provider configuration.`
         );

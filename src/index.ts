@@ -311,6 +311,7 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
   // Aborted on plugin dispose: queued-but-not-started auto-capture jobs are
   // skipped; in-flight work keeps its original (uncancellable) semantics.
   const pluginLifetime = new AbortController();
+  let cleanedUp = false;
 
   const GLOBAL_PLUGIN_WARMUP_KEY = Symbol.for("opencode-mem.plugin.warmedup");
 
@@ -328,7 +329,11 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
 
   await configureOpencodeHostTransport(ctx);
 
-  (async () => {
+  // Re-reads the provider directory into the connectivity snapshot. Errors
+  // are logged and the previous snapshot retained. The host registers
+  // user-config providers after plugin setup (provider.updated/model.updated),
+  // so this runs again on those events and on connectivity-gate misses.
+  const refreshConnectedProviders = async (): Promise<void> => {
     try {
       const providerResult = await ctx.client.provider.list();
       if (providerResult.data?.connected) {
@@ -346,7 +351,42 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
     } catch (error) {
       log("Failed to initialize opencode provider state", { error: String(error) });
     }
-  })();
+  };
+
+  void refreshConnectedProviders();
+
+  // Coalesce refresh triggers: while one refresh is in flight, later
+  // triggers mark it dirty and run one trailing refresh.
+  let refreshInFlight: Promise<void> | undefined;
+  let refreshQueued = false;
+  const runCoalescedRefresh = (): void => {
+    if (refreshInFlight) {
+      refreshQueued = true;
+      return;
+    }
+    refreshInFlight = refreshConnectedProviders().finally(() => {
+      refreshInFlight = undefined;
+      if (refreshQueued && !cleanedUp) {
+        refreshQueued = false;
+        runCoalescedRefresh();
+      } else {
+        refreshQueued = false;
+      }
+    });
+  };
+
+  // ensureProviderConnected (gate miss) reuses the same coalesced refresh;
+  // cleared on dispose so no refresh fires afterwards.
+  const { setConnectedProvidersRefresher, clearConnectedProvidersRefresher } =
+    await loadOpencodeProvider();
+  const providerRefresher = async () => {
+    await refreshConnectedProviders();
+  };
+  setConnectedProvidersRefresher(providerRefresher);
+  // Other plugin instances may have registered since; only clear our own.
+  const clearProviderRefreshWiring = () => {
+    clearConnectedProvidersRefresher(providerRefresher);
+  };
 
   let tursoReadyForWeb = !isConfigured();
   if (CONFIG.webServerEnabled && isConfigured()) {
@@ -471,10 +511,10 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
       });
   }
 
-  let cleanedUp = false;
   const cleanupPlugin = async () => {
     if (cleanedUp) return;
     cleanedUp = true;
+    clearProviderRefreshWiring();
     pluginLifetime.abort();
     for (const timer of idleTimers.values()) clearTimeout(timer);
     idleTimers.clear();
@@ -1072,6 +1112,13 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
 
     event: async (input: { event: { type: string; properties?: any } }) => {
       const event = input.event;
+
+      // Late host provider registration: user-config providers can appear
+      // (or disappear) after plugin setup; refresh the connectivity snapshot.
+      if (event.type === "provider.updated" || event.type === "model.updated") {
+        if (!cleanedUp) runCoalescedRefresh();
+        return;
+      }
 
       // Client-side step watchdog for internal structured-output sessions (#278).
       // OpenCode's agent.steps soft-cap does not hard-stop json_schema loops when
