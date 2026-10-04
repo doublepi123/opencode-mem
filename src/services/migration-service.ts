@@ -318,6 +318,7 @@ export class MigrationService {
               createdAt: Number(memory.created_at),
               updatedAt: Number(memory.updated_at),
               metadata: memory.metadata ? String(memory.metadata) : undefined,
+              sessionId: memory.session_id ? String(memory.session_id) : undefined,
               displayName: memory.display_name ? String(memory.display_name) : undefined,
               userName: memory.user_name ? String(memory.user_name) : undefined,
               userEmail: memory.user_email ? String(memory.user_email) : undefined,

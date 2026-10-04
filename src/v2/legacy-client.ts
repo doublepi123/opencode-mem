@@ -135,7 +135,9 @@ export function createLegacyClient(ctx: Context) {
         const connected = [
           ...new Set(
             providers.data
-              .filter((provider) => provider.activation !== "disabled")
+              .filter(
+                (provider) => provider.activation === "auto" || provider.activation === "enabled"
+              )
               .map((provider) => provider.id)
           ),
         ];

@@ -121,18 +121,17 @@ describe("turso vector search", () => {
     };
     const { tursoVectorSearch } = await import("../src/services/turso/vector-search.js");
     const search = tursoVectorSearch as unknown as {
-      searchKind(
+      exactScanKind(
         database: typeof db,
         queryJson: string,
         k: number,
         containerTag: string,
-        indexName: string,
         columnName: string
       ): Promise<Array<{ id: string; similarity: number }>>;
     };
 
-    await search.searchKind(db, "[1,0]", 10, "", "memories_vec_idx", "vector");
-    await search.searchKind(db, "[1,0]", 10, "opencode_project_test", "memories_vec_idx", "vector");
+    await search.exactScanKind(db, "[1,0]", 10, "", "vector");
+    await search.exactScanKind(db, "[1,0]", 10, "opencode_project_test", "vector");
 
     expect(observedSql).toHaveLength(2);
     for (const sql of observedSql) {
@@ -165,8 +164,8 @@ describe("turso vector search", () => {
       const shard = await tursoShardManager.createShard("project", scopeHash, 0);
       const db = await tursoConnectionManager.getConnection(shard.dbPath);
 
-      // 200 memories across two tags (above the over-fetch k=128). mem_rank_0 is
-      // an exact query match; every other vector is orthogonal on a different dim.
+      // 200 memories across two tags. mem_rank_0 is an exact query match;
+      // every other vector is orthogonal on a different dim.
       const now = Date.now();
       for (let i = 0; i < 200; i++) {
         const vec = new Float32Array(dims);
@@ -207,4 +206,75 @@ describe("turso vector search", () => {
       CONFIG.storagePath = previousStoragePath;
     }
   }, 60000);
+
+  it("boosts keyword matches in hybrid ranking and indexes session_id", async () => {
+    baseDir = mkdtempSync(join(tmpdir(), "turso-hybrid-session-"));
+
+    const { CONFIG } = await import("../src/config.js");
+    const previousStoragePath = CONFIG.storagePath;
+    CONFIG.storagePath = baseDir;
+    CONFIG.embeddingDimensions = 8;
+
+    try {
+      const { tursoConnectionManager } =
+        await import("../src/services/turso/connection-manager.js");
+      const { tursoShardManager } = await import("../src/services/turso/shard-manager.js");
+      const { tursoVectorSearch } = await import("../src/services/turso/vector-search.js");
+
+      const scopeHash = "b2c3d4e5f6789012";
+      const containerTag = `opencode_project_${scopeHash}`;
+      const shard = await tursoShardManager.createShard("project", scopeHash, 0);
+      const db = await tursoConnectionManager.getConnection(shard.dbPath);
+
+      const queryVector = new Float32Array(8);
+      queryVector[0] = 1;
+      const orthogonal = new Float32Array(8);
+      orthogonal[1] = 1;
+
+      await tursoVectorSearch.insertVector(db, {
+        id: "mem_kw",
+        content: "unique-keyword-alpha appears here",
+        vector: orthogonal,
+        containerTag,
+        sessionId: "sess_hybrid_1",
+        metadata: JSON.stringify({ sessionID: "sess_hybrid_1" }),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+      await tursoVectorSearch.insertVector(db, {
+        id: "mem_vec",
+        content: "unrelated text",
+        vector: queryVector,
+        containerTag,
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      });
+
+      const bySession = await tursoVectorSearch.getMemoriesBySessionID(db, "sess_hybrid_1");
+      expect(bySession.map((row) => String(row.id))).toContain("mem_kw");
+
+      const sessionRow = await db.get<{ session_id: string }>(
+        `SELECT session_id FROM memories WHERE id = ?`,
+        ["mem_kw"]
+      );
+      expect(sessionRow?.session_id).toBe("sess_hybrid_1");
+
+      const hybrid = await tursoVectorSearch.searchInShard(
+        shard,
+        queryVector,
+        containerTag,
+        5,
+        "unique-keyword-alpha"
+      );
+      expect(hybrid.some((r) => r.id === "mem_kw")).toBe(true);
+      const keywordHit = hybrid.find((r) => r.id === "mem_kw");
+      const vectorHit = hybrid.find((r) => r.id === "mem_vec");
+      expect(keywordHit).toBeTruthy();
+      expect(vectorHit).toBeTruthy();
+      // Keyword hybrid weight should keep the text match competitive.
+      expect(keywordHit!.similarity).toBeGreaterThan(0.1);
+    } finally {
+      CONFIG.storagePath = previousStoragePath;
+    }
+  });
 });

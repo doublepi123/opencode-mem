@@ -99,6 +99,7 @@ const INTERNAL_TITLE = "opencode-mem capture";
 
 mock.module(${JSON.stringify(autoCaptureUrl)}, () => ({
   performAutoCapture: async () => { calls.push("capture"); },
+  awaitCaptureDrain: async () => {},
 }));
 mock.module(${JSON.stringify(learningUrl)}, () => ({
   performUserProfileLearning: async () => { calls.push("learn"); },

@@ -86,7 +86,10 @@ mock.module(${JSON.stringify(privacyUrl)}, () => ({
   stripPrivateContent: (value) => value,
   isFullyPrivate: () => false,
 }));
-mock.module(${JSON.stringify(autoCaptureUrl)}, () => ({ performAutoCapture: async () => {} }));
+mock.module(${JSON.stringify(autoCaptureUrl)}, () => ({
+  performAutoCapture: async () => {},
+  awaitCaptureDrain: async () => {},
+}));
 mock.module(${JSON.stringify(learningUrl)}, () => ({ performUserProfileLearning: async () => {} }));
 mock.module(${JSON.stringify(promptManagerUrl)}, () => ({ userPromptManager: { savePrompt() {} } }));
 mock.module(${JSON.stringify(webServerUrl)}, () => ({

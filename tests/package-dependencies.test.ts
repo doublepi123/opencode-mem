@@ -5,6 +5,8 @@ describe("published dependency constraints", () => {
   it("uses @tursodatabase/database for local persistence (libsql kept for DiskANN migration)", () => {
     expect(pkg.dependencies["@tursodatabase/database"]).toBeTruthy();
     expect(pkg.dependencies["@libsql/client"]).toBeTruthy();
+    // Profile learning lock uses @tursodatabase/database; @libsql/client remains
+    // only for legacy DiskANN engine migration.
     expect(pkg.dependencies).not.toHaveProperty("usearch");
   });
 

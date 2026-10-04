@@ -260,9 +260,7 @@ export class TursoShardManager {
   ): Promise<void> {
     const dims = getValidatedEmbeddingDimensions(dimensions);
 
-    await applySchemaMigrations(db, memoryShardMigrations(dims), {
-      label: "memory-shard",
-    });
+    await this.ensureShardSchema(db, dims);
 
     await db.batch([
       {
@@ -280,6 +278,14 @@ export class TursoShardManager {
         args: [embeddingModel],
       },
     ]);
+  }
+
+  /** Apply pending memory-shard schema migrations without rewriting shard_metadata. */
+  async ensureShardSchema(db: TursoDb, dimensions = CONFIG.embeddingDimensions): Promise<void> {
+    const dims = getValidatedEmbeddingDimensions(dimensions);
+    await applySchemaMigrations(db, memoryShardMigrations(dims), {
+      label: "memory-shard",
+    });
   }
 
   private rowToShardInfo(row: Record<string, unknown>): ShardInfo {

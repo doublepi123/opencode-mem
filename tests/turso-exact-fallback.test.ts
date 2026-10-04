@@ -4,15 +4,15 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { cleanupTursoTestDirectory } from "./turso-test-utils.js";
 
-describe("turso exact scan fallback", () => {
+describe("turso exact cosine search", () => {
   let baseDir: string;
 
   afterEach(async () => {
     await cleanupTursoTestDirectory(baseDir);
   });
 
-  it("falls back to exact scan when vector_top_k index is missing", async () => {
-    baseDir = mkdtempSync(join(tmpdir(), "turso-exact-fallback-"));
+  it("finds memories via exact cosine scan without vector indexes", async () => {
+    baseDir = mkdtempSync(join(tmpdir(), "turso-exact-scan-"));
 
     const { CONFIG } = await import("../src/config.js");
     CONFIG.storagePath = baseDir;
@@ -27,14 +27,11 @@ describe("turso exact scan fallback", () => {
     const shard = await tursoShardManager.createShard("project", scopeHash, 0);
     const db = await tursoConnectionManager.getConnection(shard.dbPath);
 
-    await db.run(`DROP INDEX IF EXISTS memories_vec_idx`);
-    await db.run(`DROP INDEX IF EXISTS memories_tags_vec_idx`);
-
     const vector = new Float32Array(8);
     vector[0] = 1;
     await tursoVectorSearch.insertVector(db, {
       id: "mem_exact_1",
-      content: "exact fallback memory",
+      content: "exact cosine memory",
       vector,
       containerTag,
       createdAt: Date.now(),

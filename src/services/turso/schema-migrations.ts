@@ -121,6 +121,24 @@ export function memoryShardMigrations(dimensions: number): SchemaMigration[] {
         { sql: `CREATE INDEX IF NOT EXISTS idx_is_pinned ON memories(is_pinned)` },
       ],
     },
+    {
+      version: 2,
+      description:
+        "Indexed session_id for session lookup (FTS5 unavailable on @tursodatabase/database)",
+      statements: [
+        { sql: `ALTER TABLE memories ADD COLUMN session_id TEXT` },
+        { sql: `CREATE INDEX IF NOT EXISTS idx_session_id ON memories(session_id)` },
+        {
+          sql: `
+            UPDATE memories
+            SET session_id = json_extract(metadata, '$.sessionID')
+            WHERE metadata IS NOT NULL
+              AND session_id IS NULL
+              AND json_extract(metadata, '$.sessionID') IS NOT NULL
+          `,
+        },
+      ],
+    },
   ];
 }
 

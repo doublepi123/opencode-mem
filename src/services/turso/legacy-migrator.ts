@@ -304,6 +304,7 @@ function rowToRecord(row: Record<string, unknown>): MemoryRecord | null {
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
     metadata: row.metadata ? String(row.metadata) : undefined,
+    sessionId: row.session_id ? String(row.session_id) : undefined,
     displayName: row.display_name ? String(row.display_name) : undefined,
     userName: row.user_name ? String(row.user_name) : undefined,
     userEmail: row.user_email ? String(row.user_email) : undefined,

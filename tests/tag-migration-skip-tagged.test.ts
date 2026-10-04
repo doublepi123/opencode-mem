@@ -59,6 +59,7 @@ mock.module(${JSON.stringify(embeddingUrl)}, () => ({
 
 mock.module(${JSON.stringify(vectorUtilsUrl)}, () => ({
   formatTagsForEmbedding: (tags) => "Topics: " + tags.join(", "),
+  parseSessionIdFromMetadata: () => null,
 }));
 
 mock.module(${JSON.stringify(connectionManagerUrl)}, () => ({

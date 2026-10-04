@@ -1,13 +1,23 @@
 import { afterAll, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createClient } from "@libsql/client";
+import { connect } from "@tursodatabase/database";
+import { TursoDb } from "../src/services/turso/turso-db.js";
 import {
   PROFILE_LEARNING_COORDINATION_DB,
   getProfileLearningBootId,
   getProfileLearningStarttime,
 } from "../src/services/user-profile/learning-lock.js";
+import { tursoExperimentalFeatures } from "../src/services/turso/connection-manager.js";
 
 const tempDirs: string[] = [];
 
@@ -66,7 +76,14 @@ function spawnWorker(
 ): WorkerProc {
   const proc = Bun.spawn({
     cmd: [process.execPath, WORKER],
-    env: { ...process.env, PLL_STORAGE: dir, PLL_MODE: mode, PLL_LABEL: label, ...extraEnv },
+    env: {
+      ...process.env,
+      PLL_STORAGE: dir,
+      PLL_MODE: mode,
+      PLL_LABEL: label,
+      ...(mode === "cas-race" ? { PLL_CAS_HOOKS: "1" } : {}),
+      ...extraEnv,
+    },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -99,16 +116,16 @@ async function runProbe(dir: string): Promise<WorkerResult> {
 }
 
 /** Opens the coordination DB directly (fixture setup / assertions). */
-async function withDb<T>(
-  dir: string,
-  fn: (db: ReturnType<typeof createClient>) => Promise<T>
-): Promise<T> {
-  const db = createClient({ url: `file:${join(dir, PROFILE_LEARNING_COORDINATION_DB)}` });
+async function withDb<T>(dir: string, fn: (db: TursoDb) => Promise<T>): Promise<T> {
+  const native = await connect(join(dir, PROFILE_LEARNING_COORDINATION_DB), {
+    experimental: tursoExperimentalFeatures(),
+  });
+  const db = new TursoDb(native);
   try {
-    await db.execute("PRAGMA busy_timeout = 5000");
+    await db.run("PRAGMA busy_timeout = 5000");
     return await fn(db);
   } finally {
-    db.close();
+    await db.close();
   }
 }
 
@@ -122,7 +139,7 @@ interface PlantedOwner {
 
 async function plantOwner(dir: string, owner: PlantedOwner): Promise<void> {
   await withDb(dir, async (db) => {
-    await db.execute(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
+    await db.run(`CREATE TABLE IF NOT EXISTS profile_learning_lock (
       name TEXT PRIMARY KEY,
       owner_token TEXT NOT NULL,
       pid INTEGER NOT NULL,
@@ -130,18 +147,20 @@ async function plantOwner(dir: string, owner: PlantedOwner): Promise<void> {
       starttime TEXT,
       acquired_at INTEGER NOT NULL
     )`);
-    await db.execute({
-      sql: `INSERT OR REPLACE INTO profile_learning_lock
+    await db.run(
+      `INSERT OR REPLACE INTO profile_learning_lock
               (name, owner_token, pid, boot_id, starttime, acquired_at)
             VALUES ('profile-learning', ?, ?, ?, ?, ?)`,
-      args: [
+      [
         owner.ownerToken ?? "planted-owner-token",
         owner.pid,
         owner.bootId ?? null,
         owner.starttime ?? null,
         owner.acquiredAt ?? Date.now(),
-      ],
-    });
+      ]
+    );
+    // Flush WAL so freshly spawned workers always see the planted row.
+    await db.run(`PRAGMA wal_checkpoint(TRUNCATE)`);
   });
 }
 
@@ -188,10 +207,9 @@ function localKindDeadPidStarttime(): string {
 
 async function currentOwnerToken(dir: string): Promise<string | null> {
   return withDb(dir, async (db) => {
-    const result = await db.execute(
+    const row = await db.get(
       `SELECT owner_token FROM profile_learning_lock WHERE name = 'profile-learning'`
     );
-    const row = result.rows[0] as Record<string, unknown> | undefined;
     return row ? String(row["owner_token"]) : null;
   });
 }
@@ -278,10 +296,24 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
     writeFileSync(barrierPath(dir, "go"), "ready");
 
     // Both sides must have observed the SAME stale owner token before
-    // either CAS fires; the wrapped client parks each UPDATE until
-    // go.update, making the shared-snapshot precondition deterministic.
-    await waitBarrier(dir, "seen.a");
-    await waitBarrier(dir, "seen.b");
+    // either CAS fires; PLL_CAS_HOOKS parks each UPDATE until go.update,
+    // making the shared-snapshot precondition deterministic.
+    try {
+      await waitBarrier(dir, "seen.a");
+      await waitBarrier(dir, "seen.b");
+    } catch (error) {
+      const [ra, rb] = await Promise.all([a.result, b.result]);
+      throw new Error(
+        `${String(error)}\n` +
+          `a: exit=${ra.exitCode} out=${JSON.stringify(ra.parsed)} err=${ra.stderr}\n` +
+          `b: exit=${rb.exitCode} out=${JSON.stringify(rb.parsed)} err=${rb.stderr}\n` +
+          `barriers=${readdirSync(dir)
+            .filter((name) => name.startsWith("hs."))
+            .sort()
+            .join(",")}`,
+        { cause: error }
+      );
+    }
     const tokenA = readFileSync(barrierPath(dir, "token.a"), "utf-8");
     const tokenB = readFileSync(barrierPath(dir, "token.b"), "utf-8");
     expect(tokenA).toBe(tokenB);
@@ -472,54 +504,78 @@ describe("cross-process profile learning lock (SQL coordination DB)", () => {
     }
   }, 180_000);
 
-  it("same-kind Darwin starttime: impossible dates fail closed, real dates stay usable (simulated darwin host)", async () => {
-    // Runs on Linux: the child fixture forces process.platform="darwin" and
-    // mocks ONLY the ps/sysctl boundary (real @libsql driver imported before
-    // the flip; SQL/CAS run against a real temp coordination DB). The mocked
-    // ps answers one controlled valid lstart ("Sat Oct  3 09:00:00 2026") —
-    // real calendar date — for every pid, so self identity is same-kind and
-    // deterministic. Nothing here can pass via the Linux foreign-kind guard.
-    const dir = storage();
-    const worker = spawnWorker(dir, "darwin-sim", "self-lstart", {
-      PLL_STARTTIME: "Sat Oct  3 09:00:00 2026",
-    });
-    const result = await worker.result;
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toBe("");
-    const own = result.parsed?.["ownStarttime"];
-    expect(own).toBe("darwin:Sat Oct  3 09:00:00 2026");
-    const variants = result.parsed?.["variants"] as Record<string, boolean>;
-    const tokens = result.parsed?.["tokens"] as Record<string, string | null>;
+  it.skipIf(process.platform === "win32")(
+    "same-kind Darwin starttime: impossible dates fail closed, real dates stay usable (simulated darwin host)",
+    async () => {
+      // Runs on Linux/macOS hosts: the child fixture forces process.platform=
+      // "darwin" and mocks ONLY the ps/sysctl boundary (real Turso driver
+      // imported before the flip; SQL/CAS run against a real temp coordination
+      // DB). The mocked ps answers one controlled valid lstart
+      // ("Sat Oct  3 09:00:00 2026") — real calendar date — for every pid, so
+      // self identity is same-kind and deterministic. Nothing here can pass via
+      // the Linux foreign-kind guard. Skipped on Windows: Bun cannot reliably
+      // force a Darwin identity stack there (platform/ps boundary).
+      const dir = storage();
+      const worker = spawnWorker(dir, "darwin-sim", "self-lstart", {
+        PLL_STARTTIME: "Sat Oct  3 09:00:00 2026",
+      });
+      const result = await worker.result;
+      expect([result.exitCode, result.stderr]).toEqual([0, ""]);
+      const own = result.parsed?.["ownStarttime"];
+      expect(own).toBe("darwin:Sat Oct  3 09:00:00 2026");
+      const variants = result.parsed?.["variants"] as Record<string, boolean>;
+      const tokens = result.parsed?.["tokens"] as Record<string, string | null>;
 
-    // Impossible calendar values behind a structurally matching prefix:
-    // every one parses under the attempt-1 regex ((\d{1,2}) admits 00/99,
-    // no month-length/leap/weekday logic) and would CAS-steal the live row.
-    for (const name of [
-      "day-99",
-      "day-00",
-      "feb29-nonleap", // 2026-02-29 rolls to Mar 1 (a Sunday!) — only the
-      // day-rollover check catches this one, not the weekday check
-      "apr31",
-      "mar32-rolls",
-      "weekday-mismatch", // real date Oct 2 2026, wrong weekday (Fri)
-      "leap-dow-mismatch", // real leap date Feb 29 2028, wrong weekday (Tue)
-      "empty",
-      "garbage",
-    ]) {
-      expect(variants[name]).toBe(false);
-      expect(tokens[name]).toBe(`planted-${name}`);
-    }
+      // Impossible calendar values behind a structurally matching prefix:
+      // every one parses under the attempt-1 regex ((\d{1,2}) admits 00/99,
+      // no month-length/leap/weekday logic) and would CAS-steal the live row.
+      for (const name of [
+        "day-99",
+        "day-00",
+        "feb29-nonleap", // 2026-02-29 rolls to Mar 1 (a Sunday!) — only the
+        // day-rollover check catches this one, not the weekday check
+        "apr31",
+        "mar32-rolls",
+        "weekday-mismatch", // real date Oct 2 2026, wrong weekday (Fri)
+        "leap-dow-mismatch", // real leap date Feb 29 2028, wrong weekday (Tue)
+        "empty",
+        "garbage",
+      ]) {
+        expect(variants[name]).toBe(false);
+        expect(tokens[name]).toBe(`planted-${name}`);
+      }
 
-    // Real dates must remain readable identities:
-    //  - the live owner's exact lstart is never stolen;
-    //  - leap Feb 29 2028 with its correct weekday is a valid different
-    //    identity → simulated PID-reuse reclaim;
-    //  - any other real date likewise reclaims.
-    expect(variants["exact-self"]).toBe(false);
-    expect(tokens["exact-self"]).toBe("planted-exact-self");
-    expect(variants["valid-leap-feb29-steal"]).toBe(true);
-    expect(variants["valid-different-date-steal"]).toBe(true);
-  }, 120_000);
+      // Real dates must remain readable identities:
+      //  - the live owner's exact lstart is never stolen;
+      //  - leap Feb 29 2028 with its correct weekday is a valid different
+      //    identity → simulated PID-reuse reclaim;
+      //  - any other real date likewise reclaims.
+      expect(variants["exact-self"]).toBe(false);
+      expect(tokens["exact-self"]).toBe("planted-exact-self");
+      expect(variants["valid-leap-feb29-steal"]).toBe(true);
+      expect(variants["valid-different-date-steal"]).toBe(true);
+    },
+    120_000
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "live Darwin ps garbage against a valid stored identity must not steal (simulated)",
+    async () => {
+      // Self identity is a valid lstart; the foreign owner's live `ps` returns
+      // malformed text. Without live-read validation, inequality would CAS-steal.
+      // Same Windows skip as the companion darwin-sim calendar suite above.
+      const dir = storage();
+      const worker = spawnWorker(dir, "darwin-sim", "live-garbage", {
+        PLL_STARTTIME: "Sat Oct  3 09:00:00 2026",
+      });
+      const result = await worker.result;
+      expect([result.exitCode, result.stderr]).toEqual([0, ""]);
+      expect(result.parsed?.["ownStarttime"]).toBe("darwin:Sat Oct  3 09:00:00 2026");
+      expect(result.parsed?.["stolen"]).toBe(false);
+      expect(result.parsed?.["token"]).toBe("planted-live-ps-garbage");
+    },
+    60_000
+  );
 
   it("an untrusted local boot_id never acts as a dead signal", async () => {
     // Worker forces the local boot identity reader to return garbage.

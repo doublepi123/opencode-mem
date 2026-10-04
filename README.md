@@ -29,7 +29,8 @@ This plugin uses embedded Turso (`@tursodatabase/database`) with `F32_BLOB` vect
 **Notes:**
 
 - Vector embeddings are stored and searched directly in Turso; inserts store `F32_BLOB` vectors for exact cosine ranking.
-- Vector search uses exact cosine distance via `vector_distance_cos` (no DiskANN / approximate index).
+- Vector search uses exact cosine distance via `vector_distance_cos` (no DiskANN / approximate index), with optional keyword hybrid ranking when a query string is provided (`@tursodatabase/database` does not ship FTS5).
+- Session lookups use an indexed `session_id` column (backfilled from `metadata.sessionID` on schema v2).
 - Auto-capture and user profile learning require an AI provider that can return structured/tool-call output. Memory search/add/list still work without auto-capture provider configuration.
 
 ### Hardware / resource expectations

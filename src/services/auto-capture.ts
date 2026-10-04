@@ -56,6 +56,15 @@ export async function performAutoCapture(
   return next;
 }
 
+/**
+ * Wait until every capture job that has already been enqueued finishes.
+ * Used by plugin dispose so `memoryClient.close()` does not race an
+ * in-flight capture that was intentionally left uncancellable.
+ */
+export function awaitCaptureDrain(): Promise<void> {
+  return captureChain;
+}
+
 async function runAutoCapture(
   ctx: PluginInput,
   sessionID: string,

@@ -69,3 +69,34 @@ export function distanceToSimilarity(distance: number): number {
 export function formatTagsForEmbedding(tags: string[]): string {
   return `Topics: ${tags.join(", ")}`;
 }
+
+/** Split free text into lowercase tokens for keyword / hybrid search. */
+export function tokenizeQueryText(text: string | undefined | null): string[] {
+  if (!text) return [];
+  return text
+    .toLowerCase()
+    .split(/[\s,._/-]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 1)
+    .slice(0, 16);
+}
+
+/**
+ * Escape LIKE wildcards so user tokens are matched literally.
+ * Pair with `ESCAPE '\\'` in SQL.
+ */
+export function escapeLikePattern(token: string): string {
+  return token.replace(/\\/g, "\\\\").replace(/%/g, "\\%").replace(/_/g, "\\_");
+}
+
+export function parseSessionIdFromMetadata(metadata: string | undefined | null): string | null {
+  if (!metadata) return null;
+  try {
+    const parsed = JSON.parse(metadata) as Record<string, unknown>;
+    return typeof parsed.sessionID === "string" && parsed.sessionID.length > 0
+      ? parsed.sessionID
+      : null;
+  } catch {
+    return null;
+  }
+}
