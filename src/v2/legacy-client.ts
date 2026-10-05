@@ -180,7 +180,16 @@ export function createLegacyClient(ctx: Context) {
         if (generatedSessions.has(sessionID)) {
           const model =
             body.model?.providerID && body.model?.modelID
-              ? { providerID: body.model.providerID, id: body.model.modelID }
+              ? {
+                  providerID: body.model.providerID,
+                  id: body.model.modelID,
+                  // V1 prompt bodies carry the variant as a sibling of `model`
+                  // (SessionPromptData.body.variant); the V2 Generate API
+                  // takes it inside the model object.
+                  ...(typeof body.variant === "string" && body.variant
+                    ? { variant: body.variant }
+                    : {}),
+                }
               : undefined;
           const generated = await ctx.generate.text({
             prompt: schemaPrompt(body),

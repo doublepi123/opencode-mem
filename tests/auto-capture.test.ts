@@ -335,6 +335,162 @@ console.log(JSON.stringify({ toasts, failedAttempts, released }));
   };
 }
 
+function runVariantScenario(opencodeModel: string, opencodeVariant?: string) {
+  const dir = mkdtempSync(join(tmpdir(), "opencode-mem-auto-capture-variant-"));
+  tempDirs.push(dir);
+  const scriptPath = join(dir, "scenario.mjs");
+
+  const script = `
+import { mock } from "bun:test";
+
+const generateCalls = [];
+
+const prompts = [
+  {
+    id: "prompt-1",
+    sessionId: "session-1",
+    messageId: "msg-1",
+    projectPath: "/workspace",
+    content: "First request",
+    createdAt: 1,
+    captured: false,
+    claimed: false,
+    capture_attempts: 0,
+    // Recorded via chat.params so "inherit" resolves to this model.
+    providerId: "newapi",
+    modelId: "recorded-model",
+  },
+];
+
+mock.module(${JSON.stringify(configUrl)}, () => ({
+  CONFIG: {
+    autoCaptureMaxRetries: 1,
+    autoCaptureProviderStatus: { ready: true, mode: "opencode", issues: [] },
+    autoCaptureLanguage: "en",
+    opencodeProvider: "newapi",
+    opencodeModel: ${JSON.stringify(opencodeModel)},
+    ${opencodeVariant === undefined ? "" : `opencodeVariant: ${JSON.stringify(opencodeVariant)},`}
+    showAutoCaptureToasts: false,
+    showErrorToasts: false,
+  },
+}));
+
+mock.module(${JSON.stringify(clientUrl)}, () => ({
+  memoryClient: {
+    listMemories: async () => ({ success: true, memories: [] }),
+    addMemory: async () => ({ success: true, id: "mem-variant" }),
+    close() {},
+  },
+}));
+
+mock.module(${JSON.stringify(tagsUrl)}, () => ({
+  getTags: () => ({
+    project: {
+      tag: "opencode_project_test",
+      displayName: "Test Project",
+      userName: "Test User",
+      userEmail: "test@example.com",
+      projectPath: "/workspace",
+      projectName: "workspace",
+      gitRepoUrl: undefined,
+    },
+  }),
+}));
+
+mock.module(${JSON.stringify(promptManagerUrl)}, () => ({
+  userPromptManager: {
+    getLastUncapturedPrompt: (sessionId) =>
+      prompts.find((p) => p.sessionId === sessionId && !p.captured && !p.claimed) ?? null,
+    getUncapturedPromptsForSession: (sessionId) =>
+      prompts.filter((p) => p.sessionId === sessionId && !p.captured && !p.claimed),
+    claimPrompt(id) {
+      const prompt = prompts.find((item) => item.id === id);
+      if (!prompt || prompt.captured || prompt.claimed) return false;
+      prompt.claimed = true;
+      return true;
+    },
+    recordFailedAttempt() {},
+    releaseClaim(id) {
+      const prompt = prompts.find((item) => item.id === id);
+      if (prompt) prompt.claimed = false;
+      return true;
+    },
+    linkMemoryToPrompt() {},
+    markAsCaptured(id) {
+      const prompt = prompts.find((item) => item.id === id);
+      if (prompt) {
+        prompt.captured = true;
+        prompt.claimed = false;
+      }
+    },
+    deletePrompt(id) {
+      const prompt = prompts.find((item) => item.id === id);
+      if (prompt) prompt.captured = true;
+    },
+  },
+}));
+
+mock.module(${JSON.stringify(loggerUrl)}, () => ({ log: () => {} }));
+mock.module(${JSON.stringify(languageUrl)}, () => ({
+  detectLanguage: () => "en",
+  getLanguageName: () => "English",
+}));
+mock.module(${JSON.stringify(opencodeProviderLoaderUrl)}, () => ({
+  loadOpencodeProvider: async () => ({
+    ensureProviderConnected: async () => true,
+    getV2Client: () => ({}),
+    generateStructuredOutput: async (args) => {
+      generateCalls.push({
+        providerID: args.providerID,
+        modelID: args.modelID,
+        variant: args.variant,
+      });
+      return { summary: "variant-summary", type: "discussion", tags: [] };
+    },
+  }),
+}));
+
+const { performAutoCapture } = await import(${JSON.stringify(autoCaptureUrl)});
+await performAutoCapture(
+  {
+    client: {
+      session: {
+        messages: async () => ({
+          data: [
+            { info: { id: "msg-1", role: "user" }, parts: [{ type: "text", text: "First request" }] },
+            { info: { id: "assistant-1", role: "assistant" }, parts: [{ type: "text", text: "First response" }] },
+          ],
+        }),
+      },
+      tui: { showToast: async () => ({}) },
+    },
+  },
+  "session-1",
+  "/workspace"
+);
+
+console.log(JSON.stringify({ generateCalls }));
+`;
+
+  writeFileSync(scriptPath, script);
+
+  const result = Bun.spawnSync({
+    cmd: [process.execPath, scriptPath],
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  const stdout = Buffer.from(result.stdout).toString("utf8").trim();
+  const stderr = Buffer.from(result.stderr).toString("utf8").trim();
+
+  return {
+    exitCode: result.exitCode,
+    stdout,
+    stderr,
+    parsed: stdout ? JSON.parse(stdout) : null,
+  };
+}
+
 describe("auto-capture idle processing", () => {
   it("captures all uncaptured prompts in a session in chronological response windows", () => {
     const result = runScenario();
@@ -359,5 +515,31 @@ describe("auto-capture idle processing", () => {
     const message = result.parsed?.toasts[0]?.body?.message ?? "";
     expect(message).toContain("Thinking mode does not support");
     expect(message).not.toContain("External API not configured");
+  });
+
+  it("forwards CONFIG.opencodeVariant to the structured-output helper for a configured model", () => {
+    const result = runVariantScenario("grok-4.7", "xhigh");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.parsed?.generateCalls).toHaveLength(1);
+    expect(result.parsed?.generateCalls[0]).toEqual({
+      providerID: "newapi",
+      modelID: "grok-4.7",
+      variant: "xhigh",
+    });
+  });
+
+  it("does not apply opencodeVariant when opencodeModel is inherit", () => {
+    const result = runVariantScenario("inherit", "xhigh");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.parsed?.generateCalls).toHaveLength(1);
+    expect(result.parsed?.generateCalls[0]).toEqual({
+      providerID: "newapi",
+      modelID: "recorded-model",
+      variant: undefined,
+    });
   });
 });

@@ -182,6 +182,42 @@ describe("project-scoped config resolution", () => {
     expect(CONFIG.autoCaptureEnabled).toBe(false);
   });
 
+  it("parses opencodeVariant when set and treats blank values as unset", () => {
+    existsSpy = spyOn(fs, "existsSync").mockImplementation((p) =>
+      normalizePath(p).includes(".config/opencode/opencode-mem")
+    );
+    readSpy = spyOn(fs, "readFileSync");
+
+    readSpy.mockReturnValue(
+      JSON.stringify({
+        opencodeProvider: "newapi",
+        opencodeModel: "grok-4.7",
+        opencodeVariant: "xhigh",
+      }) as any
+    );
+    initConfig("/some/project");
+    expect(CONFIG.opencodeVariant).toBe("xhigh");
+
+    readSpy.mockReturnValue(
+      JSON.stringify({
+        opencodeProvider: "newapi",
+        opencodeModel: "grok-4.7",
+        opencodeVariant: "   ",
+      }) as any
+    );
+    initConfig("/some/project");
+    expect(CONFIG.opencodeVariant).toBeUndefined();
+
+    readSpy.mockReturnValue(
+      JSON.stringify({
+        opencodeProvider: "newapi",
+        opencodeModel: "grok-4.7",
+      }) as any
+    );
+    initConfig("/some/project");
+    expect(CONFIG.opencodeVariant).toBeUndefined();
+  });
+
   it("falls back to defaults when neither global nor project config exists", () => {
     existsSpy = spyOn(fs, "existsSync").mockReturnValue(false);
     initConfig("/no/config/project");

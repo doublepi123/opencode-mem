@@ -143,6 +143,8 @@
   //
   // "opencodeProvider": "anthropic",
   // "opencodeModel": "claude-haiku-4-5-20251001",
+  // Optional model reasoning variant (e.g. "xhigh"); ignored when opencodeModel is "inherit":
+  // "opencodeVariant": "xhigh",
 
   // ============================================
   // Auto-Capture Settings

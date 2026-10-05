@@ -241,6 +241,7 @@ function sessionCreateBody(): Record<string, unknown> {
 function sessionPromptFields(args: {
   providerID: string;
   modelID: string;
+  variant?: string;
   systemPrompt: string;
   userPrompt: string;
   jsonSchema: Record<string, unknown>;
@@ -248,6 +249,9 @@ function sessionPromptFields(args: {
 }): Record<string, unknown> {
   return {
     model: { providerID: args.providerID, modelID: args.modelID },
+    // The V1 session prompt body carries the reasoning variant as a sibling
+    // of `model` (SessionPromptData.body.variant), not inside model.
+    ...(args.variant ? { variant: args.variant } : {}),
     agent: STRUCTURED_OUTPUT_AGENT,
     system: args.systemPrompt,
     parts: [{ type: "text", text: args.userPrompt }],
@@ -269,6 +273,7 @@ function sessionPromptFields(args: {
 function sessionTextJsonPromptFields(args: {
   providerID: string;
   modelID: string;
+  variant?: string;
   systemPrompt: string;
   userPrompt: string;
   jsonSchema: Record<string, unknown>;
@@ -276,6 +281,7 @@ function sessionTextJsonPromptFields(args: {
   const schemaText = JSON.stringify(args.jsonSchema, null, 2);
   return {
     model: { providerID: args.providerID, modelID: args.modelID },
+    ...(args.variant ? { variant: args.variant } : {}),
     agent: STRUCTURED_OUTPUT_AGENT,
     system:
       `${args.systemPrompt}\n\n` +
@@ -334,6 +340,8 @@ export interface StructuredOutputOptions<T> {
   client: OpencodeClient;
   providerID: string;
   modelID: string;
+  /** Optional reasoning variant; forwarded only when the model came from config (not inherit). */
+  variant?: string;
   systemPrompt: string;
   userPrompt: string;
   schema: z.ZodType<T>;
@@ -407,7 +415,7 @@ export async function generateStructuredOutput<T>(opts: StructuredOutputOptions<
     providerID: opts.providerID,
     modelID: opts.modelID,
   });
-  const { client, systemPrompt, userPrompt, schema, directory, retryCount } = opts;
+  const { client, systemPrompt, userPrompt, schema, directory, retryCount, variant } = opts;
   const { providerID, modelID } = resolved;
 
   const jsonSchema =
@@ -420,6 +428,7 @@ export async function generateStructuredOutput<T>(opts: StructuredOutputOptions<
   const args: SdkStructuredOutputArgs<T> = {
     providerID,
     modelID,
+    variant,
     systemPrompt,
     userPrompt,
     directory,
@@ -460,6 +469,7 @@ type V2SessionClient = {
 interface SdkStructuredOutputArgs<T> {
   providerID: string;
   modelID: string;
+  variant?: string;
   systemPrompt: string;
   userPrompt: string;
   directory?: string;
@@ -493,6 +503,7 @@ async function generateJsonSchemaViaFetch<T>(
           directory: args.directory,
           providerID: args.providerID,
           modelID: args.modelID,
+          variant: args.variant,
           systemPrompt: args.systemPrompt,
           userPrompt: args.userPrompt,
           jsonSchema: args.jsonSchema,
@@ -794,6 +805,7 @@ interface PromptSessionArgs {
   directory?: string;
   providerID: string;
   modelID: string;
+  variant?: string;
   systemPrompt: string;
   userPrompt: string;
   jsonSchema: Record<string, unknown>;
