@@ -723,6 +723,7 @@ async function analyzeUserProfile(
       log("user-profile-learning: opencode provider diag", {
         provider: CONFIG.opencodeProvider,
         model: CONFIG.opencodeModel,
+        ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
       });
 
       const v2Client = await getOpenCodeClient();
@@ -737,6 +738,9 @@ async function analyzeUserProfile(
           client: v2Client,
           providerID: CONFIG.opencodeProvider,
           modelID: CONFIG.opencodeModel,
+          ...(CONFIG.opencodeModel !== "inherit" && CONFIG.opencodeVariant
+            ? { variant: CONFIG.opencodeVariant }
+            : {}),
           systemPrompt,
           userPrompt: context,
           schema,
@@ -859,6 +863,9 @@ If no clear chains, return { "paths": [] }.`;
             client: v2Client,
             providerID: CONFIG.opencodeProvider,
             modelID: CONFIG.opencodeModel,
+            ...(CONFIG.opencodeModel !== "inherit" && CONFIG.opencodeVariant
+              ? { variant: CONFIG.opencodeVariant }
+              : {}),
             systemPrompt,
             userPrompt,
             schema: z.object({

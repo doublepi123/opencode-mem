@@ -601,6 +601,11 @@ CAPTURE if: code changed, bug fixed, feature added, decision made`;
         client: v2Client,
         providerID,
         modelID,
+        // Only forward the configured variant when the model itself came
+        // from config; an inherit-resolved model carries its own variant.
+        ...(CONFIG.opencodeModel !== "inherit" && CONFIG.opencodeVariant
+          ? { variant: CONFIG.opencodeVariant }
+          : {}),
         systemPrompt,
         userPrompt: aiPrompt,
         schema,

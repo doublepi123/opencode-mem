@@ -103,6 +103,45 @@ describe("OpenCode v2 legacy client bridge", () => {
     expect((await client.session.delete({ sessionID })).data).toBe(true);
   });
 
+  it("forwards the prompt body variant into ctx.generate.text model and omits it when unset", async () => {
+    const generationInputs: any[] = [];
+    const ctx = createContext({
+      generate: {
+        text: async (input: any) => {
+          generationInputs.push(input);
+          return { text: '{"summary":"done","tags":["v2"]}' };
+        },
+      },
+    });
+    const client = createLegacyClient(ctx);
+
+    const created = await client.session.create({ title: "capture" });
+    const sessionID = created.data.id;
+    const promptArgs = (variant?: string) => ({
+      sessionID,
+      ...(variant ? { variant } : {}),
+      model: { providerID: "newapi", modelID: "grok-4.7" },
+      system: "Summarize the work.",
+      parts: [{ type: "text", text: "Implemented variant plumbing." }],
+      format: {
+        type: "json_schema",
+        schema: { type: "object", properties: { summary: { type: "string" } } },
+      },
+    });
+
+    await client.session.prompt(promptArgs("xhigh"));
+    await client.session.prompt(promptArgs());
+
+    expect(generationInputs[0].model).toEqual({
+      providerID: "newapi",
+      id: "grok-4.7",
+      variant: "xhigh",
+    });
+    expect(generationInputs[1].model).toEqual({ providerID: "newapi", id: "grok-4.7" });
+    expect("variant" in generationInputs[1].model).toBe(false);
+    await client.session.delete({ sessionID });
+  });
+
   it("maps V1 noReply prompts to V2 synthetic messages", async () => {
     let syntheticInput: any;
     const ctx = createContext({

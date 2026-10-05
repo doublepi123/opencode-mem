@@ -60,6 +60,12 @@ interface OpenCodeMemConfig {
   memoryExtraParams?: Record<string, unknown>;
   opencodeProvider?: string;
   opencodeModel?: string;
+  /**
+   * Optional reasoning variant for the configured opencodeProvider/opencodeModel
+   * (e.g. "xhigh"). Ignored when opencodeModel is "inherit" — inherit resolves
+   * the session's own model, which carries its own variant.
+   */
+  opencodeVariant?: string;
   aiSessionRetentionDays?: number;
   webServerEnabled?: boolean;
   webServerPort?: number;
@@ -145,6 +151,7 @@ const DEFAULTS: Required<
     | "memoryExtraParams"
     | "opencodeProvider"
     | "opencodeModel"
+    | "opencodeVariant"
     | "autoCaptureLanguage"
     | "userEmailOverride"
     | "userNameOverride"
@@ -166,6 +173,7 @@ const DEFAULTS: Required<
   memoryExtraParams?: Record<string, unknown>;
   opencodeProvider?: string;
   opencodeModel?: string;
+  opencodeVariant?: string;
   autoCaptureLanguage?: string;
   userEmailOverride?: string;
   userNameOverride?: string;
@@ -400,6 +408,8 @@ const CONFIG_TEMPLATE = `{
    //
    // "opencodeProvider": "anthropic",
    // "opencodeModel": "claude-haiku-4-5-20251001",
+   // Optional model reasoning variant (e.g. "xhigh"); ignored when opencodeModel is "inherit":
+   // "opencodeVariant": "xhigh",
 
    // ============================================
    // Auto-Capture Settings
@@ -712,6 +722,15 @@ export function normalizeAutoCleanupRetentionDays(value: number): number {
 }
 
 /**
+ * Blank/whitespace-only opencodeVariant values are treated as unset so the
+ * prompt bodies never carry an empty `variant` key.
+ */
+function normalizeOpencodeVariant(value: string | undefined): string | undefined {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return trimmed ? trimmed : undefined;
+}
+
+/**
  * User-supplied markers extend the built-in set rather than replacing it, so
  * adding one marker cannot silently disable protection against all the others.
  */
@@ -800,6 +819,7 @@ function buildConfig(fileConfig: OpenCodeMemConfig) {
     memoryExtraParams: fileConfig.memoryExtraParams,
     opencodeProvider: fileConfig.opencodeProvider,
     opencodeModel: fileConfig.opencodeModel,
+    opencodeVariant: normalizeOpencodeVariant(fileConfig.opencodeVariant),
     autoCaptureProviderStatus: getAutoCaptureProviderStatus({
       opencodeProvider: fileConfig.opencodeProvider,
       opencodeModel: fileConfig.opencodeModel,

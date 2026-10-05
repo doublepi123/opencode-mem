@@ -316,6 +316,117 @@ describe("generateStructuredOutput", () => {
     expect(String(promptBody.system)).toContain("JSON Schema");
   });
 
+  it("forwards variant inside format:json_schema path", async () => {
+    mock = installFetchMock((call) => {
+      if (call.method === "POST" && call.url.endsWith("/session")) {
+        return { body: { id: "ses_variant_1" } };
+      }
+      if (call.method === "POST" && call.url.includes("/session/ses_variant_1/message")) {
+        return {
+          body: {
+            info: { structured_output: { topic: "auth", count: 3 } },
+            parts: [],
+          },
+        };
+      }
+      if (call.method === "DELETE" && call.url.endsWith("/session/ses_variant_1")) {
+        return { body: true };
+      }
+      throw new Error(`unexpected fetch: ${call.method} ${call.url}`);
+    });
+
+    const client = createV2Client("http://127.0.0.1:9999");
+    await generateStructuredOutput({
+      client,
+      providerID: "newapi",
+      modelID: "grok-4.7",
+      variant: "xhigh",
+      systemPrompt: "system",
+      userPrompt: "user",
+      schema,
+    });
+
+    const promptCall = mock.calls.find((c) => c.url.includes("/session/ses_variant_1/message"));
+    const promptBody = promptCall!.body as Record<string, unknown>;
+    // V1 SDK SessionPromptData.body: model has no variant; a sibling
+    // top-level `variant` field carries it.
+    expect(promptBody.model).toEqual({ providerID: "newapi", modelID: "grok-4.7" });
+    expect(promptBody.variant).toBe("xhigh");
+  });
+
+  it("omits the variant key when not provided (json_schema and text-json paths)", async () => {
+    mock = installFetchMock((call) => {
+      if (call.method === "POST" && call.url.endsWith("/session")) {
+        return { body: { id: "ses_novariant" } };
+      }
+      if (call.method === "POST" && call.url.includes("/session/ses_novariant/message")) {
+        return {
+          body: {
+            info: { structured_output: { topic: "auth", count: 3 } },
+            parts: [],
+          },
+        };
+      }
+      if (call.method === "DELETE" && call.url.endsWith("/session/ses_novariant")) {
+        return { body: true };
+      }
+      throw new Error(`unexpected fetch: ${call.method} ${call.url}`);
+    });
+
+    const client = createV2Client("http://127.0.0.1:9999");
+    await generateStructuredOutput({
+      client,
+      providerID: "newapi",
+      modelID: "grok-4.7",
+      systemPrompt: "system",
+      userPrompt: "user",
+      schema,
+    });
+
+    const promptCall = mock.calls.find((c) => c.url.includes("/session/ses_novariant/message"));
+    const promptBody = promptCall!.body as Record<string, unknown>;
+    expect(promptBody).not.toHaveProperty("variant");
+    expect(promptBody.model).toEqual({ providerID: "newapi", modelID: "grok-4.7" });
+  });
+
+  it("forwards variant on the anthropic text-json path as a top-level body field", async () => {
+    mock = installFetchMock((call) => {
+      if (call.method === "POST" && call.url.endsWith("/session")) {
+        return { body: { id: "ses_anthropic_variant" } };
+      }
+      if (call.method === "POST" && call.url.includes("/session/ses_anthropic_variant/message")) {
+        return {
+          body: {
+            info: {},
+            parts: [{ type: "text", text: '{"topic":"auth","count":3}' }],
+          },
+        };
+      }
+      if (call.method === "DELETE" && call.url.endsWith("/session/ses_anthropic_variant")) {
+        return { body: true };
+      }
+      throw new Error(`unexpected fetch: ${call.method} ${call.url}`);
+    });
+
+    const client = createV2Client("http://127.0.0.1:9999");
+    await generateStructuredOutput({
+      client,
+      providerID: "anthropic",
+      modelID: "claude-haiku-4-5",
+      variant: "high",
+      systemPrompt: "system",
+      userPrompt: "user",
+      schema,
+    });
+
+    const promptCall = mock.calls.find((c) =>
+      c.url.includes("/session/ses_anthropic_variant/message")
+    );
+    const promptBody = promptCall!.body as Record<string, unknown>;
+    expect(promptBody.model).toEqual({ providerID: "anthropic", modelID: "claude-haiku-4-5" });
+    expect(promptBody.variant).toBe("high");
+  });
+
   it("rejects with full info.error details when opencode reports an assistant error", async () => {
     mock = installFetchMock((call) => {
       if (call.method === "POST" && call.url.endsWith("/session")) {
