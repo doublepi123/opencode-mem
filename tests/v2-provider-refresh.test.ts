@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const tempDirs: string[] = [];
 
@@ -11,7 +12,7 @@ afterEach(() => {
   }
 });
 
-const fixtureUrl = new URL("./fixtures/v2-provider-refresh.mjs", import.meta.url);
+const fixturePath = fileURLToPath(new URL("./fixtures/v2-provider-refresh.mjs", import.meta.url));
 
 /**
  * Spawns the fixture in an isolated process (real src/index.js plugin, real
@@ -23,7 +24,7 @@ function runScenario(scenario: string) {
   const dir = mkdtempSync(join(tmpdir(), "opencode-mem-provider-refresh-"));
   tempDirs.push(dir);
   const result = Bun.spawnSync({
-    cmd: [process.execPath, fixtureUrl.pathname, scenario],
+    cmd: [process.execPath, fixturePath, scenario],
     stdout: "pipe",
     stderr: "pipe",
     env: {
