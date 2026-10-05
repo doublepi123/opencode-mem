@@ -686,7 +686,37 @@ export async function resolveProfileLanguageName(prompts: UserPrompt[]): Promise
   return getLanguageName(targetLang);
 }
 
-function buildProfileSystemPrompt(existingProfile: UserProfile | null, langName: string): string {
+/**
+ * Outer safety-net timeout wrapping one structured-output call: the configured
+ * timeout plus a fixed margin, so the inner, more informative provider
+ * timeout always fires first. Local (not imported from config.ts) because
+ * subprocess test scenarios mock the config module with a minimal export
+ * surface.
+ */
+function outerStructuredTimeoutMs(configured: number | undefined): number {
+  return (configured ?? 90_000) + 30_000;
+}
+
+/**
+ * System prompt for the profile analysis.
+ *
+ * `mode` selects the transport the same analysis is served through:
+ * - "tool": the external-API tool-call path (`update_user_profile` forced
+ *   tool). The prompt must instruct the model to use that tool.
+ * - "json": the OpenCode structured-output path (v2 Generate API exposes no
+ *   tools). A tool instruction here makes obedient models stall on a
+ *   preamble ("Let me load the profile update tool first.") and return no
+ *   JSON, so the model is told to answer with the profile JSON object itself.
+ */
+function buildProfileSystemPrompt(
+  existingProfile: UserProfile | null,
+  langName: string,
+  mode: "tool" | "json"
+): string {
+  const closing =
+    mode === "tool"
+      ? `Use the update_user_profile tool to save the ${existingProfile ? "updated" : "new"} profile.`
+      : `Return the ${existingProfile ? "updated" : "new"} profile as the JSON object described in the request. Reply with JSON only.`;
   return `You are a user behavior analyst for a coding assistant.
 
 Your task is to analyze user prompts and ${existingProfile ? "update" : "create"} a comprehensive user profile.
@@ -695,7 +725,7 @@ CRITICAL: You MUST write all descriptions, categories, and text in ${langName}.
 
 CRITICAL: All JSON string values MUST escape double quotes with backslash. Do NOT use unescaped quotation marks inside string values.
 
-Use the update_user_profile tool to save the ${existingProfile ? "updated" : "new"} profile.`;
+${closing}`;
 }
 
 async function analyzeUserProfile(
@@ -703,10 +733,15 @@ async function analyzeUserProfile(
   existingProfile: UserProfile | null,
   langName: string
 ): Promise<AnalysisResult | null> {
-  const systemPrompt = buildProfileSystemPrompt(existingProfile, langName);
-  log("user-profile-learning: analyze called", { hasProfile: !!existingProfile });
+  // Outer safety net for the structured-output call. Derived from the same
+  // configured timeout the inner (informative) structured-output timeout uses,
+  // plus a margin, so the inner one always fires first and the error message
+  // names the real cause instead of a generic race timeout.
+  const outerTimeoutMs = outerStructuredTimeoutMs(CONFIG.opencodeTimeoutMs);
   let opencodeProviderError: unknown;
   if (CONFIG.opencodeProvider && CONFIG.opencodeModel) {
+    const systemPrompt = buildProfileSystemPrompt(existingProfile, langName, "json");
+    log("user-profile-learning: analyze called", { hasProfile: !!existingProfile });
     log("user-profile-learning: trying opencode provider");
     // The try/catch boundary is the provider only: LLM client construction,
     // the structured-output call, and schema binding. Stored-profile parsing
@@ -746,7 +781,7 @@ async function analyzeUserProfile(
           schema,
         }),
         new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("user-profile-learning: timeout")), 120000)
+          setTimeout(() => reject(new Error("user-profile-learning: timeout")), outerTimeoutMs)
         ),
       ]);
 
@@ -803,7 +838,7 @@ async function analyzeUserProfile(
   const toolSchema = createUserProfileToolSchema(Boolean(existingProfile));
 
   const result = await provider.executeToolCall(
-    systemPrompt,
+    buildProfileSystemPrompt(existingProfile, langName, "tool"),
     context,
     toolSchema,
     `user-profile-${Date.now()}`
@@ -879,7 +914,10 @@ If no clear chains, return { "paths": [] }.`;
             }),
           }),
           new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error("learning paths: opencode timeout")), 120000)
+            setTimeout(
+              () => reject(new Error("learning paths: opencode timeout")),
+              outerStructuredTimeoutMs(CONFIG.opencodeTimeoutMs)
+            )
           ),
         ])) as LearningPathsResult;
       }

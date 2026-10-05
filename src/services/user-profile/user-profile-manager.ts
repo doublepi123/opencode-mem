@@ -2049,7 +2049,10 @@ Generate a concise, abstract description of the user's general behavioral tenden
         schema,
       }),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("evolve description timeout")), 120000)
+        setTimeout(
+          () => reject(new Error("evolve description timeout")),
+          (CONFIG.opencodeTimeoutMs ?? 90_000) + 30_000
+        )
       ),
     ]);
 

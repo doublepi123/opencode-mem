@@ -145,6 +145,9 @@
   // "opencodeModel": "claude-haiku-4-5-20251001",
   // Optional model reasoning variant (e.g. "xhigh"); ignored when opencodeModel is "inherit":
   // "opencodeVariant": "xhigh",
+  // Optional timeout (ms) for the plugin's internal structured-output LLM calls
+  // (default 90000, clamped to 10000..600000; invalid values fall back to the default):
+  // "opencodeTimeoutMs": 180000,
 
   // ============================================
   // Auto-Capture Settings
