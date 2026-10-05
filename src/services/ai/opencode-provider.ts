@@ -340,7 +340,7 @@ export interface StructuredOutputOptions<T> {
   client: OpencodeClient;
   providerID: string;
   modelID: string;
-  /** Optional reasoning variant; forwarded only when the model came from config (not inherit). */
+  /** Optional reasoning variant forwarded to the session prompt / Generate API. */
   variant?: string;
   systemPrompt: string;
   userPrompt: string;

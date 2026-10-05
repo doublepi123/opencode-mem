@@ -67,8 +67,8 @@ function pendingForSession(sessionId) {
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 
-mock.module(${JSON.stringify(configUrl)}, () => ({
-  CONFIG: {
+mock.module(${JSON.stringify(configUrl)}, () => {
+  const CONFIG = {
     autoCaptureMaxRetries: 1,
     autoCaptureProviderStatus: { ready: true, mode: "opencode", issues: [] },
     autoCaptureLanguage: "en",
@@ -76,8 +76,13 @@ mock.module(${JSON.stringify(configUrl)}, () => ({
     opencodeModel: "gpt-test",
     showAutoCaptureToasts: false,
     showErrorToasts: false,
-  },
-}));
+  };
+  return {
+    CONFIG,
+    configuredOpencodeVariantFields: () =>
+      CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {},
+  };
+});
 
 mock.module(${JSON.stringify(clientUrl)}, () => ({
   memoryClient: {
@@ -231,8 +236,8 @@ const toasts = [];
 let failedAttempts = 0;
 let released = false;
 
-mock.module(${JSON.stringify(configUrl)}, () => ({
-  CONFIG: {
+mock.module(${JSON.stringify(configUrl)}, () => {
+  const CONFIG = {
     autoCaptureMaxRetries: 1,
     autoCaptureProviderStatus: { ready: true, mode: "opencode", issues: [] },
     autoCaptureLanguage: "en",
@@ -240,8 +245,13 @@ mock.module(${JSON.stringify(configUrl)}, () => ({
     opencodeModel: "deepseek-v4-flash",
     showAutoCaptureToasts: false,
     showErrorToasts: true,
-  },
-}));
+  };
+  return {
+    CONFIG,
+    configuredOpencodeVariantFields: () =>
+      CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {},
+  };
+});
 
 mock.module(${JSON.stringify(clientUrl)}, () => ({
   memoryClient: {
@@ -362,8 +372,8 @@ const prompts = [
   },
 ];
 
-mock.module(${JSON.stringify(configUrl)}, () => ({
-  CONFIG: {
+mock.module(${JSON.stringify(configUrl)}, () => {
+  const CONFIG = {
     autoCaptureMaxRetries: 1,
     autoCaptureProviderStatus: { ready: true, mode: "opencode", issues: [] },
     autoCaptureLanguage: "en",
@@ -372,8 +382,13 @@ mock.module(${JSON.stringify(configUrl)}, () => ({
     ${opencodeVariant === undefined ? "" : `opencodeVariant: ${JSON.stringify(opencodeVariant)},`}
     showAutoCaptureToasts: false,
     showErrorToasts: false,
-  },
-}));
+  };
+  return {
+    CONFIG,
+    configuredOpencodeVariantFields: () =>
+      CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {},
+  };
+});
 
 mock.module(${JSON.stringify(clientUrl)}, () => ({
   memoryClient: {
@@ -530,8 +545,21 @@ describe("auto-capture idle processing", () => {
     });
   });
 
-  it("does not apply opencodeVariant when opencodeModel is inherit", () => {
+  it("forwards opencodeVariant even when opencodeModel is inherit", () => {
     const result = runVariantScenario("inherit", "xhigh");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.parsed?.generateCalls).toHaveLength(1);
+    expect(result.parsed?.generateCalls[0]).toEqual({
+      providerID: "newapi",
+      modelID: "recorded-model",
+      variant: "xhigh",
+    });
+  });
+
+  it("omits variant when opencodeVariant is unset under inherit", () => {
+    const result = runVariantScenario("inherit");
 
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");

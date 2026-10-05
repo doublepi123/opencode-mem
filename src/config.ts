@@ -61,9 +61,10 @@ interface OpenCodeMemConfig {
   opencodeProvider?: string;
   opencodeModel?: string;
   /**
-   * Optional reasoning variant for the configured opencodeProvider/opencodeModel
-   * (e.g. "xhigh"). Ignored when opencodeModel is "inherit" — inherit resolves
-   * the session's own model, which carries its own variant.
+   * Optional reasoning variant for internal LLM calls that use
+   * opencodeProvider/opencodeModel (e.g. "xhigh"). Applied whenever set,
+   * including with opencodeModel "inherit", so background work can pin a
+   * cheaper/faster/higher variant than the interactive session default.
    */
   opencodeVariant?: string;
   aiSessionRetentionDays?: number;
@@ -408,7 +409,8 @@ const CONFIG_TEMPLATE = `{
    //
    // "opencodeProvider": "anthropic",
    // "opencodeModel": "claude-haiku-4-5-20251001",
-   // Optional model reasoning variant (e.g. "xhigh"); ignored when opencodeModel is "inherit":
+   // Optional model reasoning variant for internal LLM calls (e.g. "xhigh");
+   // also applies when opencodeModel is "inherit":
    // "opencodeVariant": "xhigh",
 
    // ============================================
@@ -728,6 +730,15 @@ export function normalizeAutoCleanupRetentionDays(value: number): number {
 function normalizeOpencodeVariant(value: string | undefined): string | undefined {
   const trimmed = typeof value === "string" ? value.trim() : "";
   return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Fields to spread into session.prompt / generateStructuredOutput when a
+ * configured reasoning variant is set. Returns `{}` when unset so callers
+ * never send an empty `variant` key.
+ */
+export function configuredOpencodeVariantFields(): { variant: string } | Record<string, never> {
+  return CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {};
 }
 
 /**
