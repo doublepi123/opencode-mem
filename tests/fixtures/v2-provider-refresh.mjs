@@ -274,20 +274,35 @@ if (scenario === "bootstrap") {
   output.refreshAttempted = await poll(() => listCalls >= 2);
   await sleep(50);
   output.newapiStillConnected = opencodeProvider.isProviderConnected("newapi");
-  output.errorLogged = logs.some((l) => l.includes("Failed to initialize opencode provider state"));
+  output.errorLogged = logs.some((l) => l.includes("Failed to refresh opencode provider state"));
   output.listCalls = listCalls;
   await cleanup();
   await plugin.dispose();
 } else if (scenario === "burst") {
   const events = [];
   for (let i = 0; i < 12; i++) {
+    // Location-bearing (and one payload-envelope) events so the V2 adapter's
+    // eventBelongsToLocation filter forwards the whole burst into legacy.event.
     events.push(
-      i % 2 ? { type: "model.updated", data: {} } : { type: "provider.updated", data: {} }
+      i % 2
+        ? {
+            type: "model.updated",
+            location: { directory: "/workspace/project" },
+            data: {},
+          }
+        : {
+            type: "provider.updated",
+            location: { directory: "/workspace/project" },
+            data: {},
+          }
     );
   }
-  // The host may also deliver events wrapped in a payload envelope.
   events[11] = {
-    payload: { type: "provider.updated", location: { directory: "/workspace/project" }, data: {} },
+    payload: {
+      type: "provider.updated",
+      location: { directory: "/workspace/project" },
+      data: {},
+    },
   };
   const adapter = makeAdapter(events);
   const cleanup = await registerV2Adapter(adapter.ctx, plugin);

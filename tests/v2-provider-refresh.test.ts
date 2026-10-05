@@ -103,10 +103,9 @@ describe("provider connectivity snapshot refresh (late provider registration)", 
 
     expect([result.exitCode, result.stderr]).toEqual([0, ""]);
     expect(result.parsed?.refreshed).toBe(true);
-    // 12 events (provider.updated + model.updated interleaved) must trigger
-    // far fewer refresh calls than events — at most one in-flight refresh
-    // plus a trailing coalesced one per settle.
-    expect(result.parsed?.listCalls).toBeLessThan(8);
+    // 12 location-bearing provider/model events must coalesce: init list plus
+    // at most a small number of trailing drains (not one list per event).
+    expect(result.parsed?.listCalls).toBeLessThanOrEqual(4);
     expect(result.parsed?.listCalls).toBeGreaterThanOrEqual(2);
   }, 30_000);
 

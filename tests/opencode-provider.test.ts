@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { z } from "zod";
 import {
+  clearConnectedProvidersRefresher,
   createV2Client,
+  ensureProviderConnected,
   generateStructuredOutput,
   getV2Client,
   isInternalStructuredSession,
@@ -10,6 +12,7 @@ import {
   resetHostFetch,
   resetInternalStructuredSessions,
   setConnectedProviders,
+  setConnectedProvidersRefresher,
   setHostFetch,
   setStructuredOutputTimeoutMsForTests,
   setV2Client,
@@ -77,6 +80,7 @@ function installFetchMock(responder: (call: FetchCall) => { status?: number; bod
 describe("connected providers state", () => {
   afterEach(() => {
     setConnectedProviders([]);
+    setConnectedProvidersRefresher(undefined);
   });
 
   it("setConnectedProviders + isProviderConnected reflect known providers", () => {
@@ -91,6 +95,45 @@ describe("connected providers state", () => {
     setConnectedProviders(["openai"]);
     expect(isProviderConnected("anthropic")).toBe(false);
     expect(isProviderConnected("openai")).toBe(true);
+  });
+
+  it("ensureProviderConnected refreshes once on miss and skips on hit", async () => {
+    let refreshCalls = 0;
+    setConnectedProviders(["opencode"]);
+    setConnectedProvidersRefresher(async () => {
+      refreshCalls += 1;
+      setConnectedProviders(["opencode", "newapi"]);
+    });
+
+    expect(await ensureProviderConnected("opencode")).toBe(true);
+    expect(refreshCalls).toBe(0);
+
+    expect(await ensureProviderConnected("newapi")).toBe(true);
+    expect(refreshCalls).toBe(1);
+    expect(await ensureProviderConnected("ghost")).toBe(false);
+    expect(refreshCalls).toBe(2);
+  });
+
+  it("clearConnectedProvidersRefresher only clears matching identity", async () => {
+    let calls = 0;
+    const refresher = async () => {
+      calls += 1;
+      setConnectedProviders(["opencode", "newapi"]);
+    };
+    const other = async () => {
+      calls += 10;
+    };
+    setConnectedProviders(["opencode"]);
+    setConnectedProvidersRefresher(refresher);
+
+    clearConnectedProvidersRefresher(other);
+    expect(await ensureProviderConnected("newapi")).toBe(true);
+    expect(calls).toBe(1);
+
+    clearConnectedProvidersRefresher(refresher);
+    setConnectedProviders(["opencode"]);
+    expect(await ensureProviderConnected("newapi")).toBe(false);
+    expect(calls).toBe(1);
   });
 });
 

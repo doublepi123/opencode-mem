@@ -283,16 +283,25 @@ export async function eventBelongsToLocation(ctx: Context, raw: any): Promise<bo
 
   const data = raw?.data ?? raw?.payload?.data ?? raw?.properties;
   const sessionID = data?.sessionID ?? data?.session?.id ?? data?.info?.id;
-  if (!sessionID) return false;
-  try {
-    const session: any = await ctx.session.get({ sessionID });
-    const sessionDirectory =
-      session?.location?.directory ?? session?.directory ?? session?.data?.directory;
-    return (
-      typeof sessionDirectory === "string" &&
-      resolve(sessionDirectory) === resolve(ctx.location.directory)
-    );
-  } catch {
-    return false;
+  if (sessionID) {
+    try {
+      const session: any = await ctx.session.get({ sessionID });
+      const sessionDirectory =
+        session?.location?.directory ?? session?.directory ?? session?.data?.directory;
+      return (
+        typeof sessionDirectory === "string" &&
+        resolve(sessionDirectory) === resolve(ctx.location.directory)
+      );
+    } catch {
+      return false;
+    }
   }
+
+  // Provider/model inventory updates are process-scoped ephemeral events with
+  // optional location. When the host omits location (and there is no session),
+  // still forward them so connectivity snapshots can refresh on late registration.
+  const envelope = raw?.payload ?? raw;
+  const source = envelope?.type === "sync" && envelope.syncEvent ? envelope.syncEvent : envelope;
+  const rawType = typeof source?.type === "string" ? source.type.replace(/\.1$/, "") : undefined;
+  return rawType === "provider.updated" || rawType === "model.updated";
 }

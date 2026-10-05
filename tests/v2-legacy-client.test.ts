@@ -176,6 +176,27 @@ describe("OpenCode v2 legacy client bridge", () => {
     ).toBe(true);
   });
 
+  it("forwards process-scoped provider/model inventory events without location", async () => {
+    const ctx = createContext();
+    expect(await eventBelongsToLocation(ctx, { type: "provider.updated", data: {} })).toBe(true);
+    expect(await eventBelongsToLocation(ctx, { type: "model.updated", data: {} })).toBe(true);
+    expect(
+      await eventBelongsToLocation(ctx, {
+        payload: { type: "provider.updated", data: {} },
+      })
+    ).toBe(true);
+    // Still location-scoped when the host does attach a directory.
+    expect(
+      await eventBelongsToLocation(ctx, {
+        type: "provider.updated",
+        location: { directory: "/workspace/other" },
+        data: {},
+      })
+    ).toBe(false);
+    // Unrelated events without location/session stay filtered out.
+    expect(await eventBelongsToLocation(ctx, { type: "session.idle", data: {} })).toBe(false);
+  });
+
   it("normalizes legacy tool results", () => {
     expect(legacyToolResult("ok")).toEqual({ content: "ok" });
     expect(legacyToolResult({ output: "done", metadata: { count: 1 } })).toEqual({
