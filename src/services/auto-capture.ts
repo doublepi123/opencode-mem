@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { memoryClient } from "./client.js";
 import { getTags } from "./tags.js";
 import { log } from "./logger.js";
-import { CONFIG, configuredOpencodeVariantFields } from "../config.js";
+import { CONFIG } from "../config.js";
 import { userPromptManager, type UserPrompt } from "./user-prompt/user-prompt-manager.js";
 import { loadOpencodeProvider } from "./ai/opencode-provider-loader.js";
 import { truncateToMaxBytes, utf8ByteLength } from "../utils/context-limit.js";
@@ -601,7 +601,7 @@ CAPTURE if: code changed, bug fixed, feature added, decision made`;
         client: v2Client,
         providerID,
         modelID,
-        ...configuredOpencodeVariantFields(),
+        ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
         systemPrompt,
         userPrompt: aiPrompt,
         schema,

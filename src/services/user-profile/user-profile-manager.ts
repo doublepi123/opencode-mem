@@ -3,7 +3,7 @@ import { closeSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } 
 import { randomUUID } from "node:crypto";
 import { tursoConnectionManager } from "../turso/connection-manager.js";
 import type { TursoDb } from "../turso/turso-db.js";
-import { CONFIG, configuredOpencodeVariantFields } from "../../config.js";
+import { CONFIG } from "../../config.js";
 import type { UserProfile, UserProfileChangelog, UserProfileData } from "./types.js";
 import { safeArray } from "./profile-utils.js";
 import { EmbeddingService } from "../embedding.js";
@@ -1571,7 +1571,7 @@ Answer JSON only: { "duplicate": true|false, "reason": "one sentence explanation
               client: v2Client,
               providerID: CONFIG.opencodeProvider,
               modelID: CONFIG.opencodeModel,
-              ...configuredOpencodeVariantFields(),
+              ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
               systemPrompt: "You are a semantic duplicate detector. Output valid JSON.",
               userPrompt: prompt,
               schema: z.object({ duplicate: z.boolean(), reason: z.string() }),
@@ -1772,7 +1772,7 @@ Answer JSON only: { "conflict": true|false, "reason": "one sentence explanation"
               client: v2Client,
               providerID: CONFIG.opencodeProvider,
               modelID: CONFIG.opencodeModel,
-              ...configuredOpencodeVariantFields(),
+              ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
               systemPrompt: "You are a preference contradiction detector. Output valid JSON.",
               userPrompt: prompt,
               schema: z.object({ conflict: z.boolean(), reason: z.string() }),
@@ -2037,7 +2037,7 @@ Generate a concise, abstract description of the user's general behavioral tenden
         client: v2Client,
         providerID: CONFIG.opencodeProvider!,
         modelID: CONFIG.opencodeModel!,
-        ...configuredOpencodeVariantFields(),
+        ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
         systemPrompt,
         userPrompt,
         schema,

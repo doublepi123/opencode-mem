@@ -1,7 +1,7 @@
 import type { PluginInput } from "@opencode-ai/plugin";
 import { getTags } from "./tags.js";
 import { log } from "./logger.js";
-import { CONFIG, configuredOpencodeVariantFields } from "../config.js";
+import { CONFIG } from "../config.js";
 import { userPromptManager } from "./user-prompt/user-prompt-manager.js";
 import type { UserPrompt } from "./user-prompt/user-prompt-manager.js";
 import { userProfileManager } from "./user-profile/user-profile-manager.js";
@@ -723,7 +723,7 @@ async function analyzeUserProfile(
       log("user-profile-learning: opencode provider diag", {
         provider: CONFIG.opencodeProvider,
         model: CONFIG.opencodeModel,
-        ...configuredOpencodeVariantFields(),
+        ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
       });
 
       const v2Client = await getOpenCodeClient();
@@ -738,7 +738,7 @@ async function analyzeUserProfile(
           client: v2Client,
           providerID: CONFIG.opencodeProvider,
           modelID: CONFIG.opencodeModel,
-          ...configuredOpencodeVariantFields(),
+          ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
           systemPrompt,
           userPrompt: context,
           schema,
@@ -861,7 +861,7 @@ If no clear chains, return { "paths": [] }.`;
             client: v2Client,
             providerID: CONFIG.opencodeProvider,
             modelID: CONFIG.opencodeModel,
-            ...configuredOpencodeVariantFields(),
+            ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
             systemPrompt,
             userPrompt,
             schema: z.object({

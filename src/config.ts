@@ -733,15 +733,6 @@ function normalizeOpencodeVariant(value: string | undefined): string | undefined
 }
 
 /**
- * Fields to spread into session.prompt / generateStructuredOutput when a
- * configured reasoning variant is set. Returns `{}` when unset so callers
- * never send an empty `variant` key.
- */
-export function configuredOpencodeVariantFields(): { variant: string } | Record<string, never> {
-  return CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {};
-}
-
-/**
  * User-supplied markers extend the built-in set rather than replacing it, so
  * adding one marker cannot silently disable protection against all the others.
  */

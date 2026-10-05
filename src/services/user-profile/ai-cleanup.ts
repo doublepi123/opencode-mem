@@ -1,5 +1,5 @@
 import type { UserProfileData } from "./types.js";
-import { CONFIG, configuredOpencodeVariantFields } from "../../config.js";
+import { CONFIG } from "../../config.js";
 import { log } from "../logger.js";
 import { loadOpencodeProvider } from "../ai/opencode-provider-loader.js";
 import {
@@ -367,7 +367,7 @@ async function callViaOpencodeWithClient(
           modelID: CONFIG.opencodeModel || "deepseek-v4-flash",
         },
         // V1 prompt body: variant is a sibling of `model`, not inside it.
-        ...configuredOpencodeVariantFields(),
+        ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
         system: systemPrompt,
         parts: [{ type: "text", text: prompt }],
         // `noReply` suppresses assistant generation; cleanup needs the JSON reply (#177).
