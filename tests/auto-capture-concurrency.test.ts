@@ -311,7 +311,7 @@ const llmEntered = new Promise((res) => { llmEnteredResolve = res; });
 const llmOrder = [];
 mock.module(${JSON.stringify(u("src/services/ai/opencode-provider-loader.js"))}, () => ({
   loadOpencodeProvider: async () => ({
-    isProviderConnected: () => true,
+    ensureProviderConnected: async () => true,
     getV2Client: () => ({}),
     generateStructuredOutput: async ({ userPrompt }) => {
       const sid = userPrompt.includes("Fix login bug") ? "sess-A" : "sess-B";
@@ -425,7 +425,7 @@ mock.module(${JSON.stringify(u("src/services/tags.js"))}, () => ({
 }));
 mock.module(${JSON.stringify(u("src/services/ai/opencode-provider-loader.js"))}, () => ({
   loadOpencodeProvider: async () => ({
-    isProviderConnected: () => true,
+    ensureProviderConnected: async () => true,
     getV2Client: () => ({}),
     generateStructuredOutput: async ({ userPrompt }) => {
       const sid = userPrompt.includes("Do work") ? "sess-X" : "?";
@@ -501,7 +501,7 @@ mock.module(${JSON.stringify(u("src/services/tags.js"))}, () => ({
 }));
 mock.module(${JSON.stringify(u("src/services/ai/opencode-provider-loader.js"))}, () => ({
   loadOpencodeProvider: async () => ({
-    isProviderConnected: () => true,
+    ensureProviderConnected: async () => true,
     getV2Client: () => ({}),
     generateStructuredOutput: async ({ userPrompt }) => {
       if (userPrompt.includes("Will fail")) throw new Error("llm exploded");
@@ -607,7 +607,7 @@ let releaseA;
 const gateA = new Promise((res) => { releaseA = res; });
 mock.module(${JSON.stringify(u("src/services/ai/opencode-provider-loader.js"))}, () => ({
   loadOpencodeProvider: async () => ({
-    isProviderConnected: () => true,
+    ensureProviderConnected: async () => true,
     getV2Client: () => ({}),
     generateStructuredOutput: async ({ userPrompt }) => {
       const sid = userPrompt.includes("In flight") ? "sess-A" : "sess-B";
