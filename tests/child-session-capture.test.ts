@@ -54,4 +54,20 @@ describe("subagent child-session prompt capture", () => {
   it("checks the session on the first prompt only for top-level sessions too", () => {
     expect(result.sessionGetCalls["v1-top"]).toBe(1);
   });
+
+  it("memoryContext.load skips child sessions by default", () => {
+    expect(result.loadChild).toBe("");
+  });
+
+  it("memoryContext.load still injects for top-level sessions", () => {
+    expect(result.loadTop).toBe("fixture-memory-context");
+  });
+
+  it("treats an empty parentID as a top-level session for load", () => {
+    expect(result.loadEmptyParent).toBe("fixture-memory-context");
+  });
+
+  it("memoryContext.load injects for child sessions when captureChildSessions is true", () => {
+    expect(result.loadChildOptIn).toBe("fixture-memory-context");
+  });
 });

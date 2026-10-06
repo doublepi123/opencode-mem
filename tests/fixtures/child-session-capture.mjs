@@ -31,7 +31,16 @@ mock.module(moduleUrl("services/client"), () => ({
   memoryClient: {
     warmup: async () => {},
     close: async () => {},
-    listMemories: async () => ({ success: true, memories: [] }),
+    listMemories: async () => ({
+      success: true,
+      memories: [
+        {
+          summary: "fixture memory",
+          createdAt: new Date().toISOString(),
+          metadata: {},
+        },
+      ],
+    }),
   },
 }));
 mock.module(moduleUrl("services/tags"), () => ({
@@ -41,7 +50,7 @@ mock.module(moduleUrl("services/tags"), () => ({
   }),
 }));
 mock.module(moduleUrl("services/context"), () => ({
-  formatContextForPrompt: async () => "",
+  formatContextForPrompt: async () => "fixture-memory-context",
 }));
 mock.module(moduleUrl("services/user-prompt/user-prompt-manager"), () => ({
   userPromptManager: {
@@ -134,8 +143,19 @@ await host.prompt("v2-child", "v2 orchestrator prompt", "mv2-child");
 await host.prompt("v2-top", "v2 human prompt", "mv2-top");
 await host.cleanup();
 
-// Opt-in: captureChildSessions true.
+// memoryContext.load must also skip child sessions (reload/rehydrate path).
+childSessions.set("load-child", { parentID: "ses_parent" });
+childSessions.set("load-top", {});
+childSessions.set("load-empty-parent", { parentID: "" });
+output.loadChild = await plugin.memoryContext.load("load-child");
+output.loadTop = await plugin.memoryContext.load("load-top");
+output.loadEmptyParent = await plugin.memoryContext.load("load-empty-parent");
+
+// Opt-in: captureChildSessions true also allows load for children.
 config.chatMessage.captureChildSessions = true;
+output.loadChildOptIn = await plugin.memoryContext.load("load-child");
+
+// Opt-in: captureChildSessions true.
 childSessions.set("v1-opt", { parentID: "ses_parent" });
 await v1Prompt("v1-opt", "m-opt", "opt-in child prompt");
 const host2 = await v2Adapter();

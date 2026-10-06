@@ -232,7 +232,9 @@ function extractSessionParentID(response: unknown): string | undefined {
     data?: { parentID?: string };
     parentID?: string;
   };
-  return obj.data?.parentID ?? obj.parentID;
+  const parentID = obj.data?.parentID ?? obj.parentID;
+  // Empty string is not a real parent link (OpenCode uses a non-empty id).
+  return typeof parentID === "string" && parentID.length > 0 ? parentID : undefined;
 }
 
 async function isChildSession(client: unknown, sessionID: string): Promise<boolean> {
@@ -255,8 +257,7 @@ async function isChildSession(client: unknown, sessionID: string): Promise<boole
 
   try {
     const hasParent =
-      typeof extractSessionParentID(await sessionClient.get({ path: { id: sessionID } })) ===
-      "string";
+      extractSessionParentID(await sessionClient.get({ path: { id: sessionID } })) !== undefined;
     if (CHILD_SESSION_LOOKUPS.size >= CHILD_SESSION_LOOKUP_CACHE_LIMIT) {
       // Insertion-order eviction keeps the map bounded without timers.
       const oldest = CHILD_SESSION_LOOKUPS.keys().next().value;
@@ -616,6 +617,7 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
     process.off("SIGTERM", shutdownHandler);
     process.off("beforeExit", beforeExitHandler);
     process.off("exit", exitHandler);
+    CHILD_SESSION_LOOKUPS.clear();
     await cleanupPlugin();
   };
 
@@ -711,7 +713,12 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
           !isConfigured() ||
           !CONFIG.chatMessage.enabled ||
           isInternalStructuredSession(sessionID) ||
-          (await isInternalCaptureSession(ctx.client, sessionID))
+          (await isInternalCaptureSession(ctx.client, sessionID)) ||
+          // Same child-session gate as capture: after plugin reload the V2
+          // context hook can rehydrate via load() without going through
+          // capturePrompt, so skip injection for orchestrator children too.
+          (!CONFIG.chatMessage.captureChildSessions &&
+            (await isChildSession(ctx.client, sessionID)))
         ) {
           return "";
         }
