@@ -147,7 +147,8 @@
   // also applies when opencodeModel is "inherit":
   // "opencodeVariant": "xhigh",
   // Optional timeout (ms) for the plugin's internal structured-output LLM calls
-  // (default 90000, clamped to 10000..600000; invalid values fall back to the default):
+  // (auto-capture summaries, profile learning; default 90000, clamped to 10000..600000;
+  // invalid values fall back to the default; numeric strings are coerced):
   // "opencodeTimeoutMs": 180000,
 
   // ============================================

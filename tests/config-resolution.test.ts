@@ -249,6 +249,11 @@ describe("project-scoped config resolution", () => {
     initConfig("/some/project");
     expect(CONFIG.opencodeTimeoutMs).toBe(90000);
 
+    // Numeric strings are coerced (common in hand-edited JSONC).
+    readSpy.mockReturnValue(JSON.stringify({ opencodeTimeoutMs: "180000" }) as any);
+    initConfig("/some/project");
+    expect(CONFIG.opencodeTimeoutMs).toBe(180000);
+
     // Unset keeps the default.
     readSpy.mockReturnValue(JSON.stringify({}) as any);
     initConfig("/some/project");
@@ -332,5 +337,9 @@ describe("structured-output timeout derivation", () => {
     expect(normalizeOpencodeTimeoutMs(undefined)).toBe(OPENCODE_TIMEOUT_MS_DEFAULT);
     expect(normalizeOpencodeTimeoutMs(Number.NaN)).toBe(OPENCODE_TIMEOUT_MS_DEFAULT);
     expect(normalizeOpencodeTimeoutMs(Number.POSITIVE_INFINITY)).toBe(OPENCODE_TIMEOUT_MS_DEFAULT);
+    expect(normalizeOpencodeTimeoutMs("180000")).toBe(180_000);
+    expect(normalizeOpencodeTimeoutMs(" 240000 ")).toBe(240_000);
+    expect(normalizeOpencodeTimeoutMs("abc")).toBe(OPENCODE_TIMEOUT_MS_DEFAULT);
+    expect(normalizeOpencodeTimeoutMs("")).toBe(OPENCODE_TIMEOUT_MS_DEFAULT);
   });
 });

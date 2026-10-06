@@ -18,6 +18,11 @@ const THREE_WAY_CENTROID_W2 = 0.45;
 const THREE_WAY_CENTROID_W3 = 0.1;
 const DIRECTION_VALIDATION_TOLERANCE = 0.03;
 
+/** Mirrors config.outerStructuredOutputTimeoutMs; kept local so fixture mocks of config.js stay minimal. */
+function outerStructuredTimeoutMs(configured: number | undefined): number {
+  return (configured ?? 90_000) + 30_000;
+}
+
 /**
  * Gamma sampler (Marsaglia-Tsang 2000).
  * Used by sampleBeta for Thompson Sampling weak-hit upgrades.
@@ -2045,7 +2050,7 @@ Generate a concise, abstract description of the user's general behavioral tenden
       new Promise((_, reject) =>
         setTimeout(
           () => reject(new Error("evolve description timeout")),
-          (CONFIG.opencodeTimeoutMs ?? 90_000) + 30_000
+          outerStructuredTimeoutMs(CONFIG.opencodeTimeoutMs)
         )
       ),
     ]);

@@ -69,9 +69,10 @@ interface OpenCodeMemConfig {
   opencodeVariant?: string;
   /**
    * Timeout in milliseconds for the plugin's internal structured-output LLM
-   * calls (auto-capture summaries, profile learning, profile cleanup).
-   * Clamped to 10000..600000; non-number/non-finite values fall back to the
-   * 90000 default.
+   * calls (auto-capture summaries, profile learning). Profile cleanup keeps
+   * its own longer timeout. Clamped to 10000..600000; non-number/non-finite
+   * values (and non-numeric strings) fall back to the 90000 default. Numeric
+   * strings like "180000" are coerced.
    */
   opencodeTimeoutMs?: number;
   aiSessionRetentionDays?: number;
@@ -422,7 +423,8 @@ const CONFIG_TEMPLATE = `{
    // also applies when opencodeModel is "inherit":
    // "opencodeVariant": "xhigh",
    // Optional timeout in milliseconds for the plugin's internal structured-output LLM calls
-   // (default 90000, clamped to 10000..600000; invalid values fall back to the default):
+   // (auto-capture summaries, profile learning; default 90000, clamped to 10000..600000;
+   // invalid values fall back to the default; numeric strings are coerced):
    // "opencodeTimeoutMs": 180000,
 
    // ============================================
@@ -750,14 +752,20 @@ export const OPENCODE_TIMEOUT_MS_DEFAULT = 90_000;
 
 /**
  * Structured-output prompt timeout: non-number/non-finite values fall back to
- * the default, otherwise the value is clamped to
- * [OPENCODE_TIMEOUT_MS_MIN, OPENCODE_TIMEOUT_MS_MAX].
+ * the default (numeric strings are coerced first), otherwise the value is
+ * clamped to [OPENCODE_TIMEOUT_MS_MIN, OPENCODE_TIMEOUT_MS_MAX].
  */
-export function normalizeOpencodeTimeoutMs(value: number | undefined): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
+export function normalizeOpencodeTimeoutMs(value: unknown): number {
+  let numeric = value;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) return OPENCODE_TIMEOUT_MS_DEFAULT;
+    numeric = Number(trimmed);
+  }
+  if (typeof numeric !== "number" || !Number.isFinite(numeric)) {
     return OPENCODE_TIMEOUT_MS_DEFAULT;
   }
-  return Math.min(OPENCODE_TIMEOUT_MS_MAX, Math.max(OPENCODE_TIMEOUT_MS_MIN, value));
+  return Math.min(OPENCODE_TIMEOUT_MS_MAX, Math.max(OPENCODE_TIMEOUT_MS_MIN, numeric));
 }
 
 /**

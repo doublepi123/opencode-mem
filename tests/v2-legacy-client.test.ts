@@ -261,11 +261,40 @@ describe("OpenCode v2 legacy client bridge", () => {
     await client.session.delete({ sessionID });
   });
 
-  it("recovers the first balanced top-level object when trailing junk follows", async () => {
+  it("recovers the last balanced top-level object when several are present", async () => {
     const ctx = createContext({
       generate: {
         text: async () => ({
-          text: 'Preamble {"summary":"done","tags":["v2"]} {"other":"trailing"}',
+          text: 'Preamble {"summary":"stub","tags":["example"]} {"summary":"done","tags":["v2"]}',
+        }),
+      },
+    });
+    const client = createLegacyClient(ctx);
+
+    const created = await client.session.create({ title: "capture" });
+    const sessionID = created.data.id;
+    const result = await client.session.prompt({
+      sessionID,
+      model: { providerID: "anthropic", modelID: "claude" },
+      parts: [{ type: "text", text: "Analyze." }],
+      format: {
+        type: "json_schema",
+        schema: { type: "object", properties: { summary: { type: "string" } } },
+      },
+    });
+
+    expect(result.data.info.structured_output).toEqual({
+      summary: "done",
+      tags: ["v2"],
+    });
+    await client.session.delete({ sessionID });
+  });
+
+  it("skips an unparseable balanced span and recovers a later object", async () => {
+    const ctx = createContext({
+      generate: {
+        text: async () => ({
+          text: 'Bad {summary: broken} then {"summary":"done","tags":["v2"]}',
         }),
       },
     });

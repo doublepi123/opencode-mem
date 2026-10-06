@@ -14,9 +14,10 @@ function textFromParts(parts: LegacyPart[] = []): string {
 /**
  * Best-effort structured-output recovery for the v2 Generate API, which has
  * no json_schema enforcement: try the raw text as JSON, then a fenced
- * ```json block, then the first balanced top-level {...} object (ignoring
- * braces inside strings). Returns undefined when nothing parses — callers
- * treat that as "no structured output" exactly as before.
+ * ```json block, then balanced top-level {...} objects (ignoring braces
+ * inside strings). When several objects parse, prefer the last one (models
+ * often emit a stub/example before the final answer). Returns undefined when
+ * nothing parses — callers treat that as "no structured output".
  */
 function parseJson(text: string): unknown {
   const trimmed = text.trim();
@@ -38,13 +39,18 @@ function parseJson(text: string): unknown {
     }
   }
 
-  // First balanced top-level object, skipping braces inside strings.
+  // Scan every balanced top-level object; keep the last one that parses.
   const candidate = fenced ?? trimmed;
-  const start = candidate.indexOf("{");
-  if (start >= 0) {
+  let lastParsed: unknown;
+  let searchFrom = 0;
+  while (searchFrom < candidate.length) {
+    const start = candidate.indexOf("{", searchFrom);
+    if (start < 0) break;
+
     let depth = 0;
     let inString = false;
     let escaped = false;
+    let found = false;
     for (let i = start; i < candidate.length; i++) {
       const ch = candidate[i];
       if (inString) {
@@ -58,18 +64,21 @@ function parseJson(text: string): unknown {
       else if (ch === "}") {
         depth--;
         if (depth === 0) {
+          found = true;
           try {
-            return JSON.parse(candidate.slice(start, i + 1));
+            lastParsed = JSON.parse(candidate.slice(start, i + 1));
           } catch {
-            // Unparseable balanced object: give up (undefined, as before).
-            return undefined;
+            // Unparseable balanced span: keep scanning for a later object.
           }
+          searchFrom = i + 1;
+          break;
         }
       }
     }
+    if (!found) break;
   }
 
-  return undefined;
+  return lastParsed;
 }
 
 function legacyMessage(message: any, sessionID: string): any {

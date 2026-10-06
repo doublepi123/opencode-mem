@@ -240,17 +240,16 @@ describe("configured structured-output timeout wiring", () => {
       await import("../src/services/ai/opencode-provider.js");
     const { CONFIG } = await import("../src/config.js");
     const globalFetch = globalThis.fetch;
+    const previousTimeout = CONFIG.opencodeTimeoutMs;
 
     try {
+      // Use a short configured timeout so the hang fails fast; the plugin
+      // init path (configureOpencodeHostTransport) must inject this value.
+      CONFIG.opencodeTimeoutMs = 50;
       await configureOpencodeHostTransport({
         client: { provider: { list: async () => ({ data: { connected: [] } }) } },
       });
 
-      // The injected value must equal the normalized configured timeout
-      // (default 90000 in the test environment).
-      expect(CONFIG.opencodeTimeoutMs).toBe(90_000);
-      // Drive one fetch-path structured-output call whose prompt never
-      // returns; the inner timeout error must report the configured value.
       globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
         const req = input instanceof Request ? input : new Request(input, init);
         const url = req.url;
@@ -264,7 +263,8 @@ describe("configured structured-output timeout wiring", () => {
         return new Response(JSON.stringify(true));
       }) as typeof fetch;
 
-      setStructuredOutputTimeoutMsForTests(40);
+      // No setStructuredOutputTimeoutMsForTests: that override would bypass
+      // the injection path under test.
       await expect(
         generateStructuredOutput({
           client: createV2Client("http://localhost:4096"),
@@ -274,12 +274,13 @@ describe("configured structured-output timeout wiring", () => {
           userPrompt: "u",
           schema: z.object({ topic: z.string(), count: z.number() }),
         })
-      ).rejects.toThrow(/structured-output timed out after 40ms/);
+      ).rejects.toThrow(/structured-output timed out after 50ms/);
     } finally {
+      CONFIG.opencodeTimeoutMs = previousTimeout;
       globalThis.fetch = globalFetch;
       resetHostFetch();
       setStructuredOutputTimeoutMsForTests(undefined);
-      setStructuredOutputTimeoutConfig(90_000);
+      setStructuredOutputTimeoutConfig(previousTimeout ?? 90_000);
     }
   });
 });
