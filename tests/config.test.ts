@@ -217,6 +217,10 @@ describe("config", () => {
     it("should expose the resolved auto-capture provider status on CONFIG", () => {
       expect(CONFIG.autoCaptureProviderStatus).toEqual(getAutoCaptureProviderStatus(CONFIG));
     });
+
+    it("should default chatMessage.captureChildSessions to false", () => {
+      expect(CONFIG.chatMessage.captureChildSessions).toBe(false);
+    });
   });
 
   describe("isConfigured", () => {
