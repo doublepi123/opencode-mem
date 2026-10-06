@@ -260,6 +260,25 @@ describe("project-scoped config resolution", () => {
     expect(CONFIG.opencodeTimeoutMs).toBe(90000);
   });
 
+  it("parses chatMessage.captureChildSessions from the global config", () => {
+    existsSpy = spyOn(fs, "existsSync").mockImplementation((p) =>
+      normalizePath(p).includes(".config/opencode/opencode-mem")
+    );
+    readSpy = spyOn(fs, "readFileSync");
+
+    readSpy.mockReturnValue(
+      JSON.stringify({
+        chatMessage: { captureChildSessions: true },
+      }) as any
+    );
+    initConfig("/some/project");
+    expect(CONFIG.chatMessage.captureChildSessions).toBe(true);
+
+    readSpy.mockReturnValue(JSON.stringify({ chatMessage: {} }) as any);
+    initConfig("/some/project");
+    expect(CONFIG.chatMessage.captureChildSessions).toBe(false);
+  });
+
   it("falls back to defaults when neither global nor project config exists", () => {
     existsSpy = spyOn(fs, "existsSync").mockReturnValue(false);
     initConfig("/no/config/project");

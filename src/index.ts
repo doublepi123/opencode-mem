@@ -218,6 +218,61 @@ async function isInternalCaptureSession(client: unknown, sessionID: string): Pro
   return false;
 }
 
+/**
+ * Bounded per-plugin cache of sessionID → has-parentID lookups. parentID never
+ * changes for a session, so each session pays one session.get across all its
+ * messages instead of one per message.
+ */
+const CHILD_SESSION_LOOKUPS: Map<string, boolean> = new Map();
+const CHILD_SESSION_LOOKUP_CACHE_LIMIT = 1000;
+
+function extractSessionParentID(response: unknown): string | undefined {
+  if (!response || typeof response !== "object") return undefined;
+  const obj = response as {
+    data?: { parentID?: string };
+    parentID?: string;
+  };
+  const parentID = obj.data?.parentID ?? obj.parentID;
+  // Empty string is not a real parent link (OpenCode uses a non-empty id).
+  return typeof parentID === "string" && parentID.length > 0 ? parentID : undefined;
+}
+
+async function isChildSession(client: unknown, sessionID: string): Promise<boolean> {
+  const cached = CHILD_SESSION_LOOKUPS.get(sessionID);
+  if (cached !== undefined) return cached;
+
+  const sessionClient = (
+    client as {
+      session?: {
+        get?: (args: unknown) => Promise<unknown>;
+      };
+    }
+  )?.session;
+
+  if (typeof sessionClient?.get !== "function") {
+    // Fail open (capture proceeds) — same behaviour as before this check existed.
+    log("child session check: session.get unavailable", { sessionID });
+    return false;
+  }
+
+  try {
+    const hasParent =
+      extractSessionParentID(await sessionClient.get({ path: { id: sessionID } })) !== undefined;
+    if (CHILD_SESSION_LOOKUPS.size >= CHILD_SESSION_LOOKUP_CACHE_LIMIT) {
+      // Insertion-order eviction keeps the map bounded without timers.
+      const oldest = CHILD_SESSION_LOOKUPS.keys().next().value;
+      if (oldest !== undefined) CHILD_SESSION_LOOKUPS.delete(oldest);
+    }
+    CHILD_SESSION_LOOKUPS.set(sessionID, hasParent);
+    return hasParent;
+  } catch (error) {
+    // Fail open on lookup failure and do not cache: a transient host error
+    // must not permanently misclassify the session.
+    log("child session check via session.get failed", { sessionID, error: String(error) });
+    return false;
+  }
+}
+
 /** Least-privilege agent used only by internal structured-output sessions (issue #189). */
 export function applyStructuredOutputAgentConfig(cfg: { agent?: Record<string, unknown> }): void {
   cfg.agent = {
@@ -571,6 +626,7 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
     process.off("SIGTERM", shutdownHandler);
     process.off("beforeExit", beforeExitHandler);
     process.off("exit", exitHandler);
+    CHILD_SESSION_LOOKUPS.clear();
     await cleanupPlugin();
   };
 
@@ -601,6 +657,16 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
     if (!userMessage.trim()) return false;
 
     if (isStructuredSummaryPromptMessage(userMessage) || isInternalStructuredSession(sessionID)) {
+      return false;
+    }
+
+    // Orchestrator child sessions (task/subagent) have a parentID; their
+    // "user" messages are parent-agent prompts, not human input. Skipping the
+    // save keeps them out of auto-capture and profile learning. Like other
+    // non-authored turns, a false return also skips memory-context injection
+    // for that turn (V1 chat.message returns early; the V2 adapter suppresses it).
+    if (!CONFIG.chatMessage.captureChildSessions && (await isChildSession(ctx.client, sessionID))) {
+      log("skipping child-session prompt capture", { sessionID });
       return false;
     }
 
@@ -656,7 +722,12 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
           !isConfigured() ||
           !CONFIG.chatMessage.enabled ||
           isInternalStructuredSession(sessionID) ||
-          (await isInternalCaptureSession(ctx.client, sessionID))
+          (await isInternalCaptureSession(ctx.client, sessionID)) ||
+          // Same child-session gate as capture: after plugin reload the V2
+          // context hook can rehydrate via load() without going through
+          // capturePrompt, so skip injection for orchestrator children too.
+          (!CONFIG.chatMessage.captureChildSessions &&
+            (await isChildSession(ctx.client, sessionID)))
         ) {
           return "";
         }

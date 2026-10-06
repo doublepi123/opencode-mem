@@ -116,6 +116,12 @@
     // notifications) so it is never stored as if the user had typed it.
     // Disable only if you deliberately want that content memorized.
     "filterInjectedPrompts": true,
+    // Capture prompts from orchestrator child sessions (sessions with a parentID,
+    // e.g. OpenCode task/subagent children). Their "user" messages are written
+    // by the parent agent, not by you, so the default false means they are not
+    // stored, auto-captured, used for profile learning, or given memory
+    // context. Enable only if you deliberately want those prompts memorized.
+    "captureChildSessions": false,
     // Extra markers identifying injected blocks. These are ADDED to the
     // built-in list, never replace it.
     // "injectionMarkers": ["<my-plugin-banner>"],

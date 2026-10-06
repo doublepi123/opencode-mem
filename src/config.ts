@@ -143,6 +143,13 @@ interface OpenCodeMemConfig {
     injectOn?: "first" | "always";
     filterInjectedPrompts?: boolean;
     injectionMarkers?: string[];
+    /**
+     * Capture "user" prompts from orchestrator child sessions (sessions with
+     * a parentID, e.g. OpenCode task/subagent). Default false: those prompts
+     * are written by the parent agent, not the human, and would train
+     * auto-capture / profile learning on the orchestrator's style.
+     */
+    captureChildSessions?: boolean;
   };
 }
 
@@ -261,6 +268,7 @@ const DEFAULTS: Required<
     injectOn: "first",
     filterInjectedPrompts: true,
     injectionMarkers: [...getDefaultInjectionMarkers()],
+    captureChildSessions: false,
   },
 };
 
@@ -656,7 +664,14 @@ const CONFIG_TEMPLATE = `{
     // (system reminders, orchestration directives, background-task
     // notifications) so it is never stored as if the user had typed it.
     // Disable only if you deliberately want that content memorized.
-    "filterInjectedPrompts": true
+    "filterInjectedPrompts": true,
+
+    // Capture prompts from orchestrator child sessions (sessions with a parentID,
+    // e.g. OpenCode task/subagent children). Their "user" messages are written
+    // by the parent agent, not by you, so default false means they are not
+    // stored, auto-captured, used for profile learning, or given memory
+    // context. Enable only if you deliberately want those prompts memorized.
+    "captureChildSessions": false
 
     // Extra markers identifying injected blocks. These are ADDED to the
     // built-in list, never replace it.
@@ -972,6 +987,8 @@ function buildConfig(fileConfig: OpenCodeMemConfig) {
       filterInjectedPrompts:
         fileConfig.chatMessage?.filterInjectedPrompts ?? DEFAULTS.chatMessage.filterInjectedPrompts,
       injectionMarkers: normalizeInjectionMarkers(fileConfig.chatMessage?.injectionMarkers),
+      captureChildSessions:
+        fileConfig.chatMessage?.captureChildSessions ?? DEFAULTS.chatMessage.captureChildSessions,
     },
   };
 }
