@@ -263,9 +263,18 @@ export async function configureOpencodeHostTransport(ctx: {
   readonly client: unknown;
   readonly serverUrl?: string | URL;
 }): Promise<void> {
-  const { createV2Client, resetHostFetch, setHostFetch, setV2Client } =
-    await loadOpencodeProvider();
+  const {
+    createV2Client,
+    resetHostFetch,
+    setHostFetch,
+    setV2Client,
+    setStructuredOutputTimeoutConfig,
+  } = await loadOpencodeProvider();
   resetHostFetch();
+  // Configured structured-output timeout (opencodeTimeoutMs): injected here so
+  // the lazily-bundled provider module never imports config.js (whose import
+  // side effects would leak into subprocess gates and loader bundles).
+  setStructuredOutputTimeoutConfig(CONFIG.opencodeTimeoutMs);
   const hostConfig = getHostClientConfig(ctx);
   if (hostConfig.fetch) {
     setHostFetch(hostConfig.fetch);

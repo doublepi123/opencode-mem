@@ -55,11 +55,39 @@ export const STRUCTURED_OUTPUT_MAX_STEPS = 2;
 /** Cap OpenCode schema retries so a bad provider cannot spin forever. */
 export const STRUCTURED_OUTPUT_DEFAULT_RETRY_COUNT = 1;
 
-let _structuredOutputTimeoutMs = STRUCTURED_OUTPUT_TIMEOUT_MS;
+let _structuredOutputTimeoutOverrideMs: number | undefined;
+// Configured timeout (CONFIG.opencodeTimeoutMs), injected by the plugin init
+// instead of importing config.js here: the provider module is bundled into a
+// single-file lazy loader whose import graph must stay free of config side
+// effects (config creation banner, DATA_DIR mkdir) for subprocess gates.
+let _structuredOutputConfiguredMs: number | undefined;
 
-/** Test helper: override the structured-output prompt timeout. Pass undefined to reset. */
+/**
+ * Test helper: override the structured-output prompt timeout. Pass undefined
+ * to reset to the configured value.
+ */
 export function setStructuredOutputTimeoutMsForTests(ms: number | undefined): void {
-  _structuredOutputTimeoutMs = ms ?? STRUCTURED_OUTPUT_TIMEOUT_MS;
+  _structuredOutputTimeoutOverrideMs = ms;
+}
+
+/**
+ * Inject the configured structured-output timeout (CONFIG.opencodeTimeoutMs,
+ * already normalized/clamped in config.ts). Called once by the plugin init.
+ */
+export function setStructuredOutputTimeoutConfig(ms: number): void {
+  _structuredOutputConfiguredMs = ms;
+}
+
+/**
+ * Effective structured-output prompt timeout: the test override wins, then
+ * the configured value, then the hard-coded default.
+ */
+function effectiveStructuredOutputTimeoutMs(): number {
+  return (
+    _structuredOutputTimeoutOverrideMs ??
+    _structuredOutputConfiguredMs ??
+    STRUCTURED_OUTPUT_TIMEOUT_MS
+  );
 }
 
 export const STRUCTURED_OUTPUT_PERMISSIONS = [
@@ -717,7 +745,7 @@ async function withStructuredOutputTimeout<T>(
   onTimeout: () => unknown
 ): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutMs = _structuredOutputTimeoutMs;
+  const timeoutMs = effectiveStructuredOutputTimeoutMs();
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
       reject(structuredOutputTimeoutError(timeoutMs));

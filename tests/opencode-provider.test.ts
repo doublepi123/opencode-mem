@@ -14,6 +14,7 @@ import {
   setConnectedProviders,
   setConnectedProvidersRefresher,
   setHostFetch,
+  setStructuredOutputTimeoutConfig,
   setStructuredOutputTimeoutMsForTests,
   setV2Client,
   shouldUseOpencodeTextJson,
@@ -198,6 +199,7 @@ describe("generateStructuredOutput", () => {
     mock = undefined;
     resetHostFetch();
     resetInternalStructuredSessions();
+    setStructuredOutputTimeoutConfig(90_000);
     setStructuredOutputTimeoutMsForTests(undefined);
   });
 
@@ -205,6 +207,7 @@ describe("generateStructuredOutput", () => {
     mock?.restore();
     resetHostFetch();
     resetInternalStructuredSessions();
+    setStructuredOutputTimeoutConfig(90_000);
     setStructuredOutputTimeoutMsForTests(undefined);
   });
 
@@ -1182,6 +1185,7 @@ describe("generateStructuredOutput tool isolation (issue #189)", () => {
     mock = undefined;
     resetHostFetch();
     resetInternalStructuredSessions();
+    setStructuredOutputTimeoutConfig(90_000);
     setStructuredOutputTimeoutMsForTests(undefined);
   });
 
@@ -1189,6 +1193,7 @@ describe("generateStructuredOutput tool isolation (issue #189)", () => {
     mock?.restore();
     resetHostFetch();
     resetInternalStructuredSessions();
+    setStructuredOutputTimeoutConfig(90_000);
     setStructuredOutputTimeoutMsForTests(undefined);
   });
 
@@ -1296,6 +1301,68 @@ describe("generateStructuredOutput tool isolation (issue #189)", () => {
     expect(calls.some((c) => c.method === "POST" && c.url.includes("/abort"))).toBe(true);
     expect(calls.some((c) => c.method === "DELETE")).toBe(true);
     expect(isInternalStructuredSession("ses_hang")).toBe(false);
+  });
+
+  it("uses the configured timeout (setStructuredOutputTimeoutConfig) with no test override", async () => {
+    // No setStructuredOutputTimeoutMsForTests call: the value injected by the
+    // plugin init (CONFIG.opencodeTimeoutMs) must drive the inner timeout.
+    const { setStructuredOutputTimeoutConfig } =
+      await import("../src/services/ai/opencode-provider.js");
+    setStructuredOutputTimeoutConfig(40);
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const req =
+        input instanceof Request
+          ? input
+          : new Request(typeof input === "string" ? input : input.toString(), init);
+      const url = req.url;
+      const method = req.method.toUpperCase();
+      if (method === "POST" && url.endsWith("/session")) {
+        return new Response(JSON.stringify({ id: "ses_config_timeout" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (method === "POST" && url.includes("/session/ses_config_timeout/message")) {
+        return await new Promise<Response>(() => {});
+      }
+      if (method === "POST" && url.includes("/abort")) {
+        return new Response(JSON.stringify(true), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (method === "DELETE") {
+        return new Response(JSON.stringify(true), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      throw new Error(`unexpected fetch: ${method} ${url}`);
+    }) as typeof fetch;
+    mock = {
+      calls: [],
+      restore: () => {
+        globalThis.fetch = originalFetch;
+      },
+    };
+
+    try {
+      const client = createV2Client("http://127.0.0.1:9999");
+      await expect(
+        generateStructuredOutput({
+          client,
+          providerID: "github-copilot",
+          modelID: "gpt-4o-mini",
+          systemPrompt: "s",
+          userPrompt: "u",
+          schema,
+        })
+      ).rejects.toThrow(/structured-output timed out after 40ms/);
+    } finally {
+      setStructuredOutputTimeoutConfig(90_000);
+    }
   });
 
   it("includes actionable provider-loop guidance in the timeout error", async () => {

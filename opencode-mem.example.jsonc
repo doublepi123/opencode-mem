@@ -146,6 +146,9 @@
   // Optional model reasoning variant for internal LLM calls (e.g. "xhigh");
   // also applies when opencodeModel is "inherit":
   // "opencodeVariant": "xhigh",
+  // Optional timeout (ms) for the plugin's internal structured-output LLM calls
+  // (default 90000, clamped to 10000..600000; invalid values fall back to the default):
+  // "opencodeTimeoutMs": 180000,
 
   // ============================================
   // Auto-Capture Settings

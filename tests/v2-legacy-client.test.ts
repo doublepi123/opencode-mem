@@ -142,6 +142,179 @@ describe("OpenCode v2 legacy client bridge", () => {
     await client.session.delete({ sessionID });
   });
 
+  it("json_schema prompts state that no tools are available and only JSON may be returned", async () => {
+    let generationPrompt = "";
+    const ctx = createContext({
+      generate: {
+        text: async (input: any) => {
+          generationPrompt = input.prompt;
+          return { text: '{"summary":"done","tags":["v2"]}' };
+        },
+      },
+    });
+    const client = createLegacyClient(ctx);
+
+    const created = await client.session.create({ title: "capture" });
+    const sessionID = created.data.id;
+    await client.session.prompt({
+      sessionID,
+      model: { providerID: "anthropic", modelID: "claude" },
+      system: "Use the update_user_profile tool to save the new profile.",
+      parts: [{ type: "text", text: "Analyze these prompts." }],
+      format: {
+        type: "json_schema",
+        schema: { type: "object", properties: { summary: { type: "string" } } },
+      },
+    });
+
+    // The v2 Generate API has no tools; the instruction must come after the
+    // system/user text and forbid tool use so obedient models answer with JSON.
+    expect(generationPrompt).toContain("No tools are available");
+    expect(generationPrompt.indexOf("No tools are available")).toBeGreaterThan(
+      generationPrompt.indexOf("Analyze these prompts.")
+    );
+    expect(generationPrompt).toContain("only the JSON object");
+    await client.session.delete({ sessionID });
+  });
+
+  it("text prompts without a json_schema format stay unchanged", async () => {
+    let generationPrompt = "";
+    const ctx = createContext({
+      generate: {
+        text: async (input: any) => {
+          generationPrompt = input.prompt;
+          return { text: "ok" };
+        },
+      },
+    });
+    const client = createLegacyClient(ctx);
+
+    const created = await client.session.create({ title: "capture" });
+    const sessionID = created.data.id;
+    await client.session.prompt({
+      sessionID,
+      model: { providerID: "anthropic", modelID: "claude" },
+      system: "Summarize the work.",
+      parts: [{ type: "text", text: "Implemented OpenCode v2." }],
+    });
+
+    expect(generationPrompt).not.toContain("no tools are available");
+    expect(generationPrompt).toContain("Summarize the work.");
+    await client.session.delete({ sessionID });
+  });
+
+  it("recovers structured output from a fenced ```json block after leading prose", async () => {
+    const ctx = createContext({
+      generate: {
+        text: async () => ({
+          text: 'I\'ll analyze these prompts first.\n\n```json\n{"summary":"done","tags":["v2"]}\n```\n\nDone.',
+        }),
+      },
+    });
+    const client = createLegacyClient(ctx);
+
+    const created = await client.session.create({ title: "capture" });
+    const sessionID = created.data.id;
+    const result = await client.session.prompt({
+      sessionID,
+      model: { providerID: "anthropic", modelID: "claude" },
+      parts: [{ type: "text", text: "Analyze." }],
+      format: {
+        type: "json_schema",
+        schema: { type: "object", properties: { summary: { type: "string" } } },
+      },
+    });
+
+    expect(result.data.info.structured_output).toEqual({
+      summary: "done",
+      tags: ["v2"],
+    });
+    await client.session.delete({ sessionID });
+  });
+
+  it("recovers structured output from leading prose without fences", async () => {
+    const ctx = createContext({
+      generate: {
+        text: async () => ({
+          text: 'Let me load the profile update tool first.\n\n{"summary":"done","tags":["v2"]}',
+        }),
+      },
+    });
+    const client = createLegacyClient(ctx);
+
+    const created = await client.session.create({ title: "capture" });
+    const sessionID = created.data.id;
+    const result = await client.session.prompt({
+      sessionID,
+      model: { providerID: "anthropic", modelID: "claude" },
+      parts: [{ type: "text", text: "Analyze." }],
+      format: {
+        type: "json_schema",
+        schema: { type: "object", properties: { summary: { type: "string" } } },
+      },
+    });
+
+    expect(result.data.info.structured_output).toEqual({
+      summary: "done",
+      tags: ["v2"],
+    });
+    await client.session.delete({ sessionID });
+  });
+
+  it("recovers the first balanced top-level object when trailing junk follows", async () => {
+    const ctx = createContext({
+      generate: {
+        text: async () => ({
+          text: 'Preamble {"summary":"done","tags":["v2"]} {"other":"trailing"}',
+        }),
+      },
+    });
+    const client = createLegacyClient(ctx);
+
+    const created = await client.session.create({ title: "capture" });
+    const sessionID = created.data.id;
+    const result = await client.session.prompt({
+      sessionID,
+      model: { providerID: "anthropic", modelID: "claude" },
+      parts: [{ type: "text", text: "Analyze." }],
+      format: {
+        type: "json_schema",
+        schema: { type: "object", properties: { summary: { type: "string" } } },
+      },
+    });
+
+    expect(result.data.info.structured_output).toEqual({
+      summary: "done",
+      tags: ["v2"],
+    });
+    await client.session.delete({ sessionID });
+  });
+
+  it("still yields no structured output when the reply is garbage", async () => {
+    const ctx = createContext({
+      generate: {
+        text: async () => ({ text: "I cannot answer that in JSON, sorry." }),
+      },
+    });
+    const client = createLegacyClient(ctx);
+
+    const created = await client.session.create({ title: "capture" });
+    const sessionID = created.data.id;
+    const result = await client.session.prompt({
+      sessionID,
+      model: { providerID: "anthropic", modelID: "claude" },
+      parts: [{ type: "text", text: "Analyze." }],
+      format: {
+        type: "json_schema",
+        schema: { type: "object", properties: { summary: { type: "string" } } },
+      },
+    });
+
+    expect(result.data.info.structured_output).toBeUndefined();
+    expect(result.data.info.structured).toBeUndefined();
+    await client.session.delete({ sessionID });
+  });
+
   it("maps V1 noReply prompts to V2 synthetic messages", async () => {
     let syntheticInput: any;
     const ctx = createContext({

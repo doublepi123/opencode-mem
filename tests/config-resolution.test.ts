@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
-import { initConfig, CONFIG } from "../src/config.js";
+import {
+  initConfig,
+  CONFIG,
+  normalizeOpencodeTimeoutMs,
+  outerStructuredOutputTimeoutMs,
+  OPENCODE_TIMEOUT_MS_DEFAULT,
+} from "../src/config.js";
 
 describe("project-scoped config resolution", () => {
   let readSpy: ReturnType<typeof spyOn>;
@@ -218,6 +224,37 @@ describe("project-scoped config resolution", () => {
     expect(CONFIG.opencodeVariant).toBeUndefined();
   });
 
+  it("parses opencodeTimeoutMs with clamping and default fallback", () => {
+    existsSpy = spyOn(fs, "existsSync").mockImplementation((p) =>
+      normalizePath(p).includes(".config/opencode/opencode-mem")
+    );
+    readSpy = spyOn(fs, "readFileSync");
+
+    readSpy.mockReturnValue(JSON.stringify({ opencodeTimeoutMs: 180000 }) as any);
+    initConfig("/some/project");
+    expect(CONFIG.opencodeTimeoutMs).toBe(180000);
+
+    // Below the floor.
+    readSpy.mockReturnValue(JSON.stringify({ opencodeTimeoutMs: 500 }) as any);
+    initConfig("/some/project");
+    expect(CONFIG.opencodeTimeoutMs).toBe(10000);
+
+    // Above the ceiling.
+    readSpy.mockReturnValue(JSON.stringify({ opencodeTimeoutMs: 9_999_999 }) as any);
+    initConfig("/some/project");
+    expect(CONFIG.opencodeTimeoutMs).toBe(600000);
+
+    // Non-finite values fall back to the default.
+    readSpy.mockReturnValue(JSON.stringify({ opencodeTimeoutMs: Number.POSITIVE_INFINITY }) as any);
+    initConfig("/some/project");
+    expect(CONFIG.opencodeTimeoutMs).toBe(90000);
+
+    // Unset keeps the default.
+    readSpy.mockReturnValue(JSON.stringify({}) as any);
+    initConfig("/some/project");
+    expect(CONFIG.opencodeTimeoutMs).toBe(90000);
+  });
+
   it("falls back to defaults when neither global nor project config exists", () => {
     existsSpy = spyOn(fs, "existsSync").mockReturnValue(false);
     initConfig("/no/config/project");
@@ -277,5 +314,23 @@ describe("project-scoped config resolution", () => {
     expect(() => initConfig("/my/project")).toThrow(
       /Project config cannot set remote provider fields: memoryProvider/
     );
+  });
+});
+
+describe("structured-output timeout derivation", () => {
+  it("outer race = configured + 30000 so the inner timeout always fires first", () => {
+    expect(outerStructuredOutputTimeoutMs(90_000)).toBe(120_000);
+    expect(outerStructuredOutputTimeoutMs(180_000)).toBe(210_000);
+    // Undefined falls back to the default (e.g. a partial CONFIG shape).
+    expect(outerStructuredOutputTimeoutMs(undefined)).toBe(OPENCODE_TIMEOUT_MS_DEFAULT + 30_000);
+  });
+
+  it("normalizeOpencodeTimeoutMs clamps and falls back to the default", () => {
+    expect(normalizeOpencodeTimeoutMs(90_000)).toBe(90_000);
+    expect(normalizeOpencodeTimeoutMs(5_000)).toBe(10_000);
+    expect(normalizeOpencodeTimeoutMs(1_000_000)).toBe(600_000);
+    expect(normalizeOpencodeTimeoutMs(undefined)).toBe(OPENCODE_TIMEOUT_MS_DEFAULT);
+    expect(normalizeOpencodeTimeoutMs(Number.NaN)).toBe(OPENCODE_TIMEOUT_MS_DEFAULT);
+    expect(normalizeOpencodeTimeoutMs(Number.POSITIVE_INFINITY)).toBe(OPENCODE_TIMEOUT_MS_DEFAULT);
   });
 });

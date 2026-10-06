@@ -67,6 +67,13 @@ interface OpenCodeMemConfig {
    * cheaper/faster/higher variant than the interactive session default.
    */
   opencodeVariant?: string;
+  /**
+   * Timeout in milliseconds for the plugin's internal structured-output LLM
+   * calls (auto-capture summaries, profile learning, profile cleanup).
+   * Clamped to 10000..600000; non-number/non-finite values fall back to the
+   * 90000 default.
+   */
+  opencodeTimeoutMs?: number;
   aiSessionRetentionDays?: number;
   webServerEnabled?: boolean;
   webServerPort?: number;
@@ -153,6 +160,7 @@ const DEFAULTS: Required<
     | "opencodeProvider"
     | "opencodeModel"
     | "opencodeVariant"
+    | "opencodeTimeoutMs"
     | "autoCaptureLanguage"
     | "userEmailOverride"
     | "userNameOverride"
@@ -175,6 +183,7 @@ const DEFAULTS: Required<
   opencodeProvider?: string;
   opencodeModel?: string;
   opencodeVariant?: string;
+  opencodeTimeoutMs?: number;
   autoCaptureLanguage?: string;
   userEmailOverride?: string;
   userNameOverride?: string;
@@ -412,6 +421,9 @@ const CONFIG_TEMPLATE = `{
    // Optional model reasoning variant for internal LLM calls (e.g. "xhigh");
    // also applies when opencodeModel is "inherit":
    // "opencodeVariant": "xhigh",
+   // Optional timeout in milliseconds for the plugin's internal structured-output LLM calls
+   // (default 90000, clamped to 10000..600000; invalid values fall back to the default):
+   // "opencodeTimeoutMs": 180000,
 
    // ============================================
    // Auto-Capture Settings
@@ -732,6 +744,37 @@ function normalizeOpencodeVariant(value: string | undefined): string | undefined
   return trimmed ? trimmed : undefined;
 }
 
+export const OPENCODE_TIMEOUT_MS_MIN = 10_000;
+export const OPENCODE_TIMEOUT_MS_MAX = 600_000;
+export const OPENCODE_TIMEOUT_MS_DEFAULT = 90_000;
+
+/**
+ * Structured-output prompt timeout: non-number/non-finite values fall back to
+ * the default, otherwise the value is clamped to
+ * [OPENCODE_TIMEOUT_MS_MIN, OPENCODE_TIMEOUT_MS_MAX].
+ */
+export function normalizeOpencodeTimeoutMs(value: number | undefined): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return OPENCODE_TIMEOUT_MS_DEFAULT;
+  }
+  return Math.min(OPENCODE_TIMEOUT_MS_MAX, Math.max(OPENCODE_TIMEOUT_MS_MIN, value));
+}
+
+/**
+ * Margin added to the configured structured-output timeout for the outer
+ * safety-net races around generateStructuredOutput calls: the inner, more
+ * informative provider timeout always fires first.
+ */
+export const OPENCODE_TIMEOUT_OUTER_MARGIN_MS = 30_000;
+
+/**
+ * Outer safety-net timeout wrapping one structured-output call, derived from
+ * the configured timeout plus a fixed margin.
+ */
+export function outerStructuredOutputTimeoutMs(configured: number | undefined): number {
+  return (configured ?? OPENCODE_TIMEOUT_MS_DEFAULT) + OPENCODE_TIMEOUT_OUTER_MARGIN_MS;
+}
+
 /**
  * User-supplied markers extend the built-in set rather than replacing it, so
  * adding one marker cannot silently disable protection against all the others.
@@ -822,6 +865,7 @@ function buildConfig(fileConfig: OpenCodeMemConfig) {
     opencodeProvider: fileConfig.opencodeProvider,
     opencodeModel: fileConfig.opencodeModel,
     opencodeVariant: normalizeOpencodeVariant(fileConfig.opencodeVariant),
+    opencodeTimeoutMs: normalizeOpencodeTimeoutMs(fileConfig.opencodeTimeoutMs),
     autoCaptureProviderStatus: getAutoCaptureProviderStatus({
       opencodeProvider: fileConfig.opencodeProvider,
       opencodeModel: fileConfig.opencodeModel,
