@@ -773,9 +773,7 @@ async function analyzeUserProfile(
           client: v2Client,
           providerID: CONFIG.opencodeProvider,
           modelID: CONFIG.opencodeModel,
-          ...(CONFIG.opencodeModel !== "inherit" && CONFIG.opencodeVariant
-            ? { variant: CONFIG.opencodeVariant }
-            : {}),
+          ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
           systemPrompt,
           userPrompt: context,
           schema,
@@ -898,9 +896,7 @@ If no clear chains, return { "paths": [] }.`;
             client: v2Client,
             providerID: CONFIG.opencodeProvider,
             modelID: CONFIG.opencodeModel,
-            ...(CONFIG.opencodeModel !== "inherit" && CONFIG.opencodeVariant
-              ? { variant: CONFIG.opencodeVariant }
-              : {}),
+            ...(CONFIG.opencodeVariant ? { variant: CONFIG.opencodeVariant } : {}),
             systemPrompt,
             userPrompt,
             schema: z.object({

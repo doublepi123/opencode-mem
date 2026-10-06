@@ -61,9 +61,10 @@ interface OpenCodeMemConfig {
   opencodeProvider?: string;
   opencodeModel?: string;
   /**
-   * Optional reasoning variant for the configured opencodeProvider/opencodeModel
-   * (e.g. "xhigh"). Ignored when opencodeModel is "inherit" — inherit resolves
-   * the session's own model, which carries its own variant.
+   * Optional reasoning variant for internal LLM calls that use
+   * opencodeProvider/opencodeModel (e.g. "xhigh"). Applied whenever set,
+   * including with opencodeModel "inherit", so background work can pin a
+   * cheaper/faster/higher variant than the interactive session default.
    */
   opencodeVariant?: string;
   /**
@@ -417,7 +418,8 @@ const CONFIG_TEMPLATE = `{
    //
    // "opencodeProvider": "anthropic",
    // "opencodeModel": "claude-haiku-4-5-20251001",
-   // Optional model reasoning variant (e.g. "xhigh"); ignored when opencodeModel is "inherit":
+   // Optional model reasoning variant for internal LLM calls (e.g. "xhigh");
+   // also applies when opencodeModel is "inherit":
    // "opencodeVariant": "xhigh",
    // Optional timeout in milliseconds for the plugin's internal structured-output LLM calls
    // (default 90000, clamped to 10000..600000; invalid values fall back to the default):

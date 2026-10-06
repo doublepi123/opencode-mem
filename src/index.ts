@@ -358,41 +358,43 @@ export const OpenCodeMemPlugin: Plugin = async (ctx: PluginInput) => {
         });
       }
     } catch (error) {
-      log("Failed to initialize opencode provider state", { error: String(error) });
+      log("Failed to refresh opencode provider state", { error: String(error) });
     }
   };
 
-  void refreshConnectedProviders();
-
-  // Coalesce refresh triggers: while one refresh is in flight, later
-  // triggers mark it dirty and run one trailing refresh.
+  // Coalesce refresh triggers into one in-flight pass plus trailing drain.
+  // Event handlers and ensureProviderConnected (gate miss) share this path so
+  // concurrent list() calls collapse; callers can await the same promise.
   let refreshInFlight: Promise<void> | undefined;
   let refreshQueued = false;
-  const runCoalescedRefresh = (): void => {
-    if (refreshInFlight) {
-      refreshQueued = true;
-      return;
-    }
-    refreshInFlight = refreshConnectedProviders().finally(() => {
+  const runCoalescedRefresh = (): Promise<void> => {
+    refreshQueued = true;
+    if (refreshInFlight) return refreshInFlight;
+
+    refreshInFlight = (async () => {
+      while (refreshQueued && !cleanedUp) {
+        refreshQueued = false;
+        await refreshConnectedProviders();
+      }
+    })().finally(() => {
       refreshInFlight = undefined;
       if (refreshQueued && !cleanedUp) {
-        refreshQueued = false;
-        runCoalescedRefresh();
-      } else {
-        refreshQueued = false;
+        void runCoalescedRefresh();
       }
     });
+    return refreshInFlight;
   };
 
-  // ensureProviderConnected (gate miss) reuses the same coalesced refresh;
-  // cleared on dispose so no refresh fires afterwards.
+  void runCoalescedRefresh();
+
+  // Gate miss awaits the same coalesced refresh; cleared on dispose so no
+  // refresh fires afterwards. Only clear our own refresher identity.
   const { setConnectedProvidersRefresher, clearConnectedProvidersRefresher } =
     await loadOpencodeProvider();
   const providerRefresher = async () => {
-    await refreshConnectedProviders();
+    await runCoalescedRefresh();
   };
   setConnectedProvidersRefresher(providerRefresher);
-  // Other plugin instances may have registered since; only clear our own.
   const clearProviderRefreshWiring = () => {
     clearConnectedProvidersRefresher(providerRefresher);
   };

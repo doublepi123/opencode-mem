@@ -530,8 +530,21 @@ describe("auto-capture idle processing", () => {
     });
   });
 
-  it("does not apply opencodeVariant when opencodeModel is inherit", () => {
+  it("forwards opencodeVariant even when opencodeModel is inherit", () => {
     const result = runVariantScenario("inherit", "xhigh");
+
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.parsed?.generateCalls).toHaveLength(1);
+    expect(result.parsed?.generateCalls[0]).toEqual({
+      providerID: "newapi",
+      modelID: "recorded-model",
+      variant: "xhigh",
+    });
+  });
+
+  it("omits variant when opencodeVariant is unset under inherit", () => {
+    const result = runVariantScenario("inherit");
 
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
